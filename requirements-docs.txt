@@ -1,0 +1,2 @@
+# Optional: regenerate docs/moboclaw-design-document.pdf
+reportlab>=4.0
