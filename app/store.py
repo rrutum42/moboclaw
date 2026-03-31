@@ -18,6 +18,7 @@ class EmulatorRecord:
         "health_ok",
         "consecutive_health_failures",
         "message",
+        "adb_serial",
         "lock",
     )
 
@@ -31,6 +32,7 @@ class EmulatorRecord:
         self.health_ok = True
         self.consecutive_health_failures = 0
         self.message: str | None = None
+        self.adb_serial: str | None = None
         self.lock = asyncio.Lock()
 
 
@@ -93,6 +95,15 @@ class InMemoryStore:
     async def list_running_emulator_ids(self) -> list[str]:
         async with self._lock:
             return [eid for eid, r in self.emulators.items() if r.state == EmulatorState.RUNNING]
+
+    async def list_all_emulator_ids(self) -> list[str]:
+        async with self._lock:
+            return list(self.emulators.keys())
+
+    async def clear_emulators(self) -> None:
+        async with self._lock:
+            self.emulators.clear()
+            self.warm_idle_queue.clear()
 
 
 store = InMemoryStore()

@@ -4,11 +4,13 @@ import asyncio
 import logging
 from typing import Any
 
+from app.config import settings
 from app.models import CreateSnapshotRequest, CreateSnapshotResponse, EmulatorState, SnapshotRecord
-
-log = logging.getLogger(__name__)
+from app.services.android_sdk_emulator import adb_snapshot_save, sanitize_avd_snapshot_name, sdk_adb_path
 from app.services.ids import new_snapshot_id
 from app.store import InMemoryStore
+
+log = logging.getLogger(__name__)
 
 
 async def capture_snapshot(
@@ -16,6 +18,12 @@ async def capture_snapshot(
     emulator_id: str,
     body: CreateSnapshotRequest,
 ) -> CreateSnapshotResponse:
+    log.info(
+        "snapshot capture request emulator_id=%s layer=%s backend=%s",
+        emulator_id,
+        body.layer,
+        settings.backend,
+    )
     rec = await store.get_emulator(emulator_id)
     if not rec:
         raise KeyError("emulator not found")
@@ -24,11 +32,28 @@ async def capture_snapshot(
             raise ValueError(f"emulator not RUNNING (state={rec.state})")
         rec.state = EmulatorState.SNAPSHOTTING
 
-    await asyncio.sleep(0.3)
+    if settings.backend != "sdk":
+        await asyncio.sleep(0.3)
 
     parent = rec.current_snapshot_id
     sid = new_snapshot_id()
-    meta: dict[str, Any] = {"mock_capture": True}
+    if settings.backend == "sdk":
+        serial = rec.adb_serial
+        if not serial:
+            async with rec.lock:
+                rec.state = EmulatorState.RUNNING
+            raise ValueError("SDK backend: emulator has no adb serial; cannot snapshot")
+        snap_name = sanitize_avd_snapshot_name(f"sn_{sid.replace('-', '')}")
+        log.info(
+            "snapshot capture adb save start emulator_id=%s serial=%s snap_name=%s",
+            emulator_id,
+            serial,
+            snap_name,
+        )
+        await adb_snapshot_save(sdk_adb_path(settings), serial, snap_name)
+        meta = {"sdk_snapshot": True, "sdk_snapshot_name": snap_name}
+    else:
+        meta = {"mock_capture": True}
     snap = SnapshotRecord(
         id=sid,
         layer=body.layer,

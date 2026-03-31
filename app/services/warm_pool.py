@@ -5,8 +5,8 @@ import logging
 
 from app.config import Settings
 from app.models import EmulatorState
+from app.services.emulator_backend import EmulatorBackend
 from app.services.ids import new_emulator_id
-from app.services.simulation import simulate_boot_seconds
 from app.services.snapshots import BASE_SNAPSHOT_ID
 from app.store import InMemoryStore, new_emulator_record
 
@@ -19,18 +19,31 @@ class WarmPool:
         store: InMemoryStore,
         settings: Settings,
         replenish_lock: asyncio.Lock,
+        backend: EmulatorBackend,
     ) -> None:
         self._store = store
         self._settings = settings
         self._replenish_lock = replenish_lock
+        self._backend = backend
 
     async def warm_idle_count(self) -> int:
         return await self._store.count_warm_idle_running()
 
     async def ensure_full(self) -> None:
-        async with self._replenish_lock:
-            while await self.warm_idle_count() < self._settings.warm_pool_size:
+        """Fill the warm pool. Lock is held only for count checks — not during boot (slow).
+
+        Long boots used to run under the same lock as snapshot provisioning, which blocked
+        POST /emulators (named snapshot) until every warm spawn finished.
+        """
+        while True:
+            async with self._replenish_lock:
+                if await self.warm_idle_count() >= self._settings.warm_pool_size:
+                    return
+            try:
                 await self._spawn_one()
+            except Exception:
+                log.exception("warm pool spawn failed")
+                return
 
     async def _spawn_one(self) -> str | None:
         eid = new_emulator_id()
@@ -40,7 +53,11 @@ class WarmPool:
         await self._store.add_emulator(rec)
         async with rec.lock:
             rec.state = EmulatorState.STARTING
-        boot = await simulate_boot_seconds(from_warm_pool=False, settings=self._settings)
+        try:
+            boot = await self._backend.boot_warm(eid)
+        except Exception:
+            await self._store.remove_emulator(eid)
+            raise
         async with rec.lock:
             if rec.state == EmulatorState.DESTROYED:
                 return None

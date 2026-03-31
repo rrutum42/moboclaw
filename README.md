@@ -4,7 +4,7 @@ This repo implements the take-home in parts. **Part 1 (emulator orchestration)**
 
 ## Part 1: Emulator orchestration (prototype)
 
-The service uses a **mock Android emulator backend** that preserves the **REST contract and lifecycle** (create/start/stop/snapshot/teardown). Swap the mock for AOSP / Docker Android / Genymotion by implementing the same operations behind `EmulatorService` / `WarmPool` (see layout below).
+The default backend is **mock** (simulated delays, no real devices). Set **`EMULATOR_BACKEND=sdk`** to run **real Android Emulator** processes using the same **Android SDK** layout as the CLI (`$ANDROID_HOME/emulator/emulator` and `$ANDROID_HOME/platform-tools/adb`). The warm pool starts one process per slot (see `EMULATOR_WARM_POOL_SIZE`); each instance uses **`-read-only`** so multiple concurrent emulators can share one AVD image. **Docker Compose** does not include the Android SDK—use **mock** in containers, or run **`sdk` on the host** where Studio / `sdkmanager` / `avdmanager` are installed.
 
 ### Code layout (`app/`) — MVC-style
 
@@ -12,7 +12,7 @@ The service uses a **mock Android emulator backend** that preserves the **REST c
 |-------|--------|----------------|
 | **Entry** | `main.py` | FastAPI app, lifespan, routers. |
 | **Controller** | `controllers/system.py`, `emulators.py`, `users_sessions.py`, `missions.py` | HTTP routes. |
-| **Service** | `emulator_service`, `warm_pool`, `health_monitor`, `snapshot_capture`, `emulator_lifecycle`, `snapshots`, `simulation`, `ids` | Part 1 emulator orchestration. |
+| **Service** | `emulator_service`, `warm_pool`, `health_monitor`, `emulator_backend`, `android_sdk_emulator`, `snapshot_capture`, `emulator_lifecycle`, `snapshots`, `simulation`, `ids` | Part 1 emulator orchestration. |
 | | `session_service`, `session_health_worker` | Part 2 sessions + tiered health worker. |
 | | `mission_service` | Part 3 missions (scheduler, identity gate, webhooks). |
 | **DB** | `db/engine.py`, `db/orm.py`, `db/init_db.py`, `db/deps.py` | Async SQLAlchemy + **SQLite** (`aiosqlite`). |
@@ -50,6 +50,18 @@ Expected: `{"status":"ok"}`.
 
 OpenAPI UI: `http://localhost:8082/docs`
 
+#### Docker Compose with **real** Android emulators (`EMULATOR_BACKEND=sdk`)
+
+The default Compose file uses the **mock** emulator backend. To run **Linux** Android Emulator binaries **inside** the container (suitable for CI or Docker Desktop), use the second Compose file and **`Dockerfile.sdk`**:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sdk.yml up --build
+```
+
+The first image build downloads the Android command-line tools, emulator, platform, and a system image (large download; often 10+ minutes). The service sets **`EMULATOR_WARM_POOL_SIZE=1`** by default in `docker-compose.sdk.yml` because each slot is a full VM. **`shm_size: 2gb`** is set for the emulator.
+
+On **Linux** hosts, you can uncomment **`devices: /dev/kvm`** in `docker-compose.sdk.yml` for hardware acceleration. **Docker Desktop for Mac** does not expose `/dev/kvm`; emulators use software rendering and are slower. You cannot mount a **macOS** host `~/Library/Android/sdk` into a Linux container and run those binaries—the image installs a **Linux** SDK at **`/opt/android-sdk`**.
+
 ### Run locally (without Docker)
 
 From this directory (`moboclaw/`):
@@ -82,14 +94,44 @@ Part 2 uses **SQLite** by default (`./sessions.db` next to the app, or `/app/dat
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BACKEND` | `mock` | `mock` = simulated delays; **`sdk`** = real `emulator` + `adb` (requires `ANDROID_HOME` / `ANDROID_SDK_ROOT`). |
+| `EMULATOR_ANDROID_SDK_ROOT` | _(unset)_ | Optional SDK root override; if unset, **`ANDROID_SDK_ROOT`** or **`ANDROID_HOME`** is used. |
+| `AVD_NAME` | `Pixel_6_API_34` | AVD name as shown by `emulator -list-avds` / **Device Manager**. |
+| `EMULATOR_EMULATOR_BINARY` / `EMULATOR_ADB_BINARY` | _(unset)_ | Override paths to `emulator` and `adb` if not under the default SDK layout. |
+| `EMULATOR_EMULATOR_EXTRA_ARGS` | _(see `config.py`)_ | Extra CLI args for each emulator (quoted list: `-no-window -no-audio` …). |
+| `EMULATOR_EMULATOR_PORT_START` | `5554` | First **console** port; additional instances use +2, +4, … (`emulator-5554`, …). |
+| `EMULATOR_EMULATOR_BOOT_COMPLETED_TIMEOUT_SECONDS` | `420` | Max wait for `sys.boot_completed=1` after `adb` sees the serial. |
 | `WARM_POOL_SIZE` | `3` | Target count of **warm idle** emulators (base snapshot, ready to assign). |
-| `RESTORE_FROM_SNAPSHOT_SECONDS` | `2.5` | Simulated boot when assigning from the warm pool (stays &lt; 30s). |
-| `COLD_BOOT_SECONDS` | `8` | Simulated cold boot when the pool is empty. |
+| `RESTORE_FROM_SNAPSHOT_SECONDS` | `2.5` | **Mock only:** simulated boot when assigning from the warm pool. |
+| `COLD_BOOT_SECONDS` | `8` | **Mock only:** simulated cold boot when the pool is empty. |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | `3` | Background health loop interval. |
-| `MOCK_UNHEALTHY_PROBABILITY` | `0.05` | Mock chance a probe fails (ANR/hang/boot flake). |
+| `MOCK_UNHEALTHY_PROBABILITY` | `0.05` | **Mock only:** chance a probe fails. With **`sdk`**, health uses **`adb shell getprop sys.boot_completed`**. |
 | `MAX_HEALTH_FAILURES_BEFORE_REPLACE` | `2` | Consecutive failures before **auto-replace** (destroy + replenish warm pool). |
 
-### Layered snapshots (mock)
+**SDK prerequisites (host):** install **Android SDK Command-line Tools**, **platform-tools**, **emulator**, and a **system image**; create an AVD (e.g. `avdmanager create avd` or Android Studio).
+
+On **macOS**, you can install the usual CLI pieces and create a default AVD with Homebrew via:
+
+```bash
+./scripts/install_android_emulator_prereqs_mac.sh
+```
+
+(Requires [Homebrew](https://brew.sh); installs Temurin JDK if needed, the Android command-line tools cask, copies **cmdline-tools** into **`ANDROID_HOME`**—a symlink to Homebrew’s tree breaks **`avdmanager`**—then runs `sdkmanager` and creates an AVD named `Pixel_6_API_34` unless you override `AVD_NAME` / `API_LEVEL`.)
+
+Then run the API with the SDK backend, for example:
+
+```bash
+export ANDROID_HOME="$HOME/Library/Android/sdk"   # macOS typical path
+export EMULATOR_BACKEND=sdk
+export EMULATOR_AVD_NAME=Your_Avd_Name
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+
+### Layered snapshots
+
+With **`EMULATOR_BACKEND=sdk`**, `POST /emulators/{id}/snapshot` runs **`adb emu avd snapshot save`** and stores the AVD snapshot name in **`metadata.sdk_snapshot_name`**. Provisioning from that snapshot uses **`adb emu avd snapshot load`** (warm) or **`-snapshot`** on a cold boot. Snapshots created in **mock** mode cannot be restored on **sdk** until you capture them again on a device.
+
+In **mock** mode, the same API is simulated:
 
 1. **Base** — seeded `snap-base-default` (“clean Android”) on startup.
 2. **App** — `POST /emulators/{id}/snapshot` with `layer: "app"`.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -16,6 +17,15 @@ def get_emulator_service() -> EmulatorService:
     return emulator_service
 
 
+@router.get("/emulators", response_model=list[EmulatorStatusResponse])
+async def list_emulators(
+    running_only: bool = False,
+    svc: EmulatorService = Depends(get_emulator_service),
+):
+    """List emulators tracked by this service (`emu-…` ids). Set `running_only=true` for RUNNING only."""
+    return await svc.list_emulators(running_only=running_only)
+
+
 @router.post("/emulators", response_model_exclude_none=True)
 async def provision_emulator(
     body: ProvisionEmulatorRequest = Body(default_factory=ProvisionEmulatorRequest),
@@ -26,6 +36,15 @@ async def provision_emulator(
     except ValueError as e:
         log.warning("provision_emulator rejected: %s", e)
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        log.warning("provision_emulator timed out: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"emulator provision timed out: {e}",
+        ) from e
+    except (RuntimeError, OSError) as e:
+        log.warning("provision_emulator failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 @router.get("/emulators/{emulator_id}/status", response_model=EmulatorStatusResponse)

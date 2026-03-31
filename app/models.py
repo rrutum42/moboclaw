@@ -38,6 +38,8 @@ class EmulatorStatusResponse(BaseModel):
     health_ok: bool = True
     consecutive_health_failures: int = 0
     message: str | None = None
+    # Set when EMULATOR_BACKEND=sdk (adb serial, e.g. emulator-5554).
+    adb_serial: str | None = None
 
 
 class ProvisionEmulatorRequest(BaseModel):
