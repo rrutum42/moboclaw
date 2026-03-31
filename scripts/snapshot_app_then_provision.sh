@@ -2,10 +2,8 @@
 # List RUNNING emulators from moboclaw, take an app-layer snapshot of the first one,
 # then provision a new emulator from that snapshot.
 #
-# Note: provisioning from a named snapshot stops existing *warm_pool* emulators (including
-# the one you snapshotted) so a writable AVD can boot from that snapshot. The API then
-# refills the warm pool. Expect the first emulator to disappear from adb while the new
-# provisioned instance comes up.
+# Provisioning from a snapshot drains warm instances first, then boots a new emulator with
+# full userdata (apps, sessions). The warm emulator used for the snapshot is stopped as part of provision.
 #
 # Requires: curl, jq
 # Usage:

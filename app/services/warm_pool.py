@@ -37,7 +37,7 @@ class WarmPool:
         """
         while True:
             async with self._replenish_lock:
-                if await self.warm_idle_count() >= self._settings.warm_pool_size:
+                if await self.warm_idle_count() >= self._settings.effective_warm_pool_size():
                     return
             try:
                 await self._spawn_one()

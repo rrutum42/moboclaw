@@ -20,6 +20,7 @@ from app.services.emulator_backend import EmulatorBackend, create_emulator_backe
 from app.services.emulator_lifecycle import destroy_emulator as teardown_emulator
 from app.services.health_monitor import HealthMonitor
 from app.services.ids import new_emulator_id
+from app.services.qcow2_metadata import QCOW2_USERDATA_PATH
 from app.services.snapshot_capture import capture_snapshot
 from app.services.snapshots import BASE_SNAPSHOT_ID, seed_base_snapshot
 from app.services.warm_pool import WarmPool
@@ -53,8 +54,10 @@ class EmulatorService:
     async def start_background_tasks(self) -> None:
         await seed_base_snapshot(self.store)
         log.info(
-            "emulator background tasks starting (warm_pool_size=%s)",
+            "emulator background tasks starting warm_pool_size=%s effective=%s warm_boot_read_only=%s",
             self.settings.warm_pool_size,
+            self.settings.effective_warm_pool_size(),
+            self.settings.warm_boot_read_only,
         )
         self._shutdown.clear()
         self._initial_warm_task = asyncio.create_task(
@@ -102,38 +105,6 @@ class EmulatorService:
     def _schedule_replenish(self) -> None:
         asyncio.create_task(self.warm_pool.ensure_full())
 
-    async def _drain_warm_idle_no_replenish(self) -> None:
-        """Stop other warm_pool instances so a single cold boot can load a named snapshot.
-
-        Multiple same-AVD emulator processes can block on disk locks; adb never lists the
-        new device and POST /emulators appears to hang until the boot timeout.
-        """
-        ids = await self.store.list_all_emulator_ids()
-        for eid in list(ids):
-            rec = await self.store.get_emulator(eid)
-            if not rec or rec.pool_role != "warm_idle":
-                continue
-            # pool_role stays warm_idle during POST .../snapshot while state is SNAPSHOTTING;
-            # never tear down an emulator mid-snapshot or mid-boot.
-            if rec.state != EmulatorState.RUNNING:
-                log.info(
-                    "snapshot restore: skip warm_idle id=%s state=%s (busy)",
-                    eid,
-                    rec.state,
-                )
-                continue
-            log.info(
-                "snapshot restore: stopping warm_idle id=%s (exclusive AVD for snapshot cold boot)",
-                eid,
-            )
-            await self._backend.teardown(eid)
-            await teardown_emulator(
-                self.store,
-                eid,
-                "snapshot_restore_exclusive_avd",
-                quick=self.settings.backend == "sdk",
-            )
-
     async def provision(self, snapshot_id: str | None) -> ProvisionEmulatorResponse:
         target = snapshot_id or BASE_SNAPSHOT_ID
         snap = await self.store.get_snapshot(target)
@@ -142,27 +113,14 @@ class EmulatorService:
         if (
             self.settings.backend == "sdk"
             and target != BASE_SNAPSHOT_ID
-            and not snap.metadata.get("sdk_snapshot_name")
+            and not snap.metadata.get(QCOW2_USERDATA_PATH)
         ):
             raise ValueError(
-                "SDK backend: snapshot must be created on-device (POST .../snapshot); "
-                "missing metadata.sdk_snapshot_name",
+                f"SDK backend: snapshot must include metadata.{QCOW2_USERDATA_PATH} (qcow2 branch image).",
             )
-
-        need_exclusive_avd = (
-            self.settings.backend == "sdk" and target != BASE_SNAPSHOT_ID
-        )
 
         async def _do() -> ProvisionEmulatorResponse:
-            log.info(
-                "provision step: target=%s need_exclusive_avd=%s",
-                target,
-                need_exclusive_avd,
-            )
-            # Warm pool instances boot with -no-snapshot-load. Restoring a named snapshot
-            # via adb on a *different* running instance than the one that saved it is unreliable
-            # with read-only/multi-instance AVDs. Non-base snapshots must cold-boot with
-            # -snapshot <name> so the image is loaded from the shared AVD snapshot store.
+            log.info("provision step: target=%s", target)
             warm_id = (
                 await self.store.pop_warm_idle() if target == BASE_SNAPSHOT_ID else None
             )
@@ -227,24 +185,8 @@ class EmulatorService:
             )
 
         try:
-            if need_exclusive_avd:
-                log.info(
-                    "snapshot restore: acquiring replenish lock and draining warm pool for %s",
-                    target,
-                )
-                async with self._replenish_lock:
-                    await self._drain_warm_idle_no_replenish()
-                    delay = self.settings.emulator_avd_settle_delay_seconds
-                    if self.settings.backend == "sdk" and delay > 0:
-                        log.info(
-                            "snapshot restore: AVD settle delay %.1fs before cold boot",
-                            delay,
-                        )
-                        await asyncio.sleep(delay)
-                    return await _do()
             return await _do()
         finally:
-            # Refill warm pool after success or failure (failure used to leave zero emulators).
             self._schedule_replenish()
 
     async def create_snapshot(
@@ -252,7 +194,13 @@ class EmulatorService:
         emulator_id: str,
         body: CreateSnapshotRequest,
     ) -> CreateSnapshotResponse:
-        return await capture_snapshot(self.store, emulator_id, body)
+        return await capture_snapshot(
+            self.store,
+            emulator_id,
+            body,
+            settings=self.settings,
+            backend=self._backend,
+        )
 
     async def list_emulators(self, *, running_only: bool = False) -> list[EmulatorStatusResponse]:
         if running_only:

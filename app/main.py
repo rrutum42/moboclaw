@@ -25,8 +25,10 @@ async def lifespan(app: FastAPI):
     await init_db()
     workers = await start_background_workers()
     log.info(
-        "emulator orchestrator started warm_pool_size=%s",
+        "emulator orchestrator started warm_pool_size=%s effective=%s warm_boot_read_only=%s",
         settings.warm_pool_size,
+        settings.effective_warm_pool_size(),
+        settings.warm_boot_read_only,
     )
     yield
     await stop_background_workers(workers)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import shlex
 import time
 from pathlib import Path
@@ -37,6 +36,14 @@ def _split_extra_args(extra: str) -> list[str]:
     if not extra:
         return []
     return shlex.split(extra)
+
+
+def emulator_cli_extra_args(settings: Settings) -> list[str]:
+    """Extra emulator argv; strips ``-no-window`` when ``emulator_ui_mode=window``."""
+    parts = _split_extra_args(settings.emulator_extra_args)
+    if settings.emulator_ui_mode == "window":
+        parts = [p for p in parts if p != "-no-window"]
+    return parts
 
 
 async def _run_text(
@@ -174,54 +181,15 @@ async def adb_emu_kill(adb: Path, serial: str) -> None:
     await _run_text(str(adb), "-s", serial, "emu", "kill", timeout=60.0)
 
 
-def sanitize_avd_snapshot_name(name: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_]", "_", name)[:64]
-
-
-async def adb_snapshot_save(adb: Path, serial: str, snapshot_name: str) -> None:
-    safe = sanitize_avd_snapshot_name(snapshot_name)
-    code, out, err = await _run_text(
-        str(adb),
-        "-s",
-        serial,
-        "emu",
-        "avd",
-        "snapshot",
-        "save",
-        safe,
-        timeout=600.0,
-    )
-    if code != 0:
-        raise RuntimeError(f"adb snapshot save failed: {err or out}")
-    log.info("saved AVD snapshot name=%s serial=%s", safe, serial)
-
-
-async def adb_snapshot_load(adb: Path, serial: str, snapshot_name: str) -> None:
-    safe = sanitize_avd_snapshot_name(snapshot_name)
-    code, out, err = await _run_text(
-        str(adb),
-        "-s",
-        serial,
-        "emu",
-        "avd",
-        "snapshot",
-        "load",
-        safe,
-        timeout=300.0,
-    )
-    if code != 0:
-        raise RuntimeError(f"adb snapshot load failed: {err or out}")
-    log.info("loaded AVD snapshot name=%s serial=%s", safe, serial)
-
-
 async def start_emulator_process(
     settings: Settings,
     *,
     console_port: int,
     read_only_avd: bool,
-    snapshot_at_boot: str | None,
-    no_snapshot_load: bool,
+    android_avd_home: Path | None = None,
+    avd_name: str | None = None,
 ) -> asyncio.subprocess.Process:
+    """Start emulator with v1 qcow2 session AVD (``-no-snapshot-load``; no adb/AVD snapshots)."""
     sdk = settings.resolved_android_sdk_root()
     emu = sdk_emulator_path(settings)
     import os
@@ -231,20 +199,20 @@ async def start_emulator_process(
         "ANDROID_SDK_ROOT": str(sdk),
         "ANDROID_HOME": str(sdk),
     }
+    if android_avd_home is not None:
+        env["ANDROID_AVD_HOME"] = str(android_avd_home.resolve())
+    name = avd_name or settings.avd_name
     cmd: list[str] = [
         str(emu),
         "-avd",
-        settings.avd_name,
+        name,
         "-port",
         str(console_port),
     ]
     if read_only_avd:
         cmd.append("-read-only")
-    if snapshot_at_boot:
-        cmd.extend(["-snapshot", snapshot_at_boot])
-    elif no_snapshot_load:
-        cmd.append("-no-snapshot-load")
-    cmd.extend(_split_extra_args(settings.emulator_extra_args))
+    cmd.append("-no-snapshot-load")
+    cmd.extend(emulator_cli_extra_args(settings))
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

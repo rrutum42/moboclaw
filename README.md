@@ -4,7 +4,7 @@ This repo implements the take-home in parts. **Part 1 (emulator orchestration)**
 
 ## Part 1: Emulator orchestration (prototype)
 
-The default backend is **mock** (simulated delays, no real devices). Set **`EMULATOR_BACKEND=sdk`** to run **real Android Emulator** processes using the same **Android SDK** layout as the CLI (`$ANDROID_HOME/emulator/emulator` and `$ANDROID_HOME/platform-tools/adb`). The warm pool starts one process per slot (see `EMULATOR_WARM_POOL_SIZE`); each instance uses **`-read-only`** so multiple concurrent emulators can share one AVD image. **Docker Compose** does not include the Android SDK—use **mock** in containers, or run **`sdk` on the host** where Studio / `sdkmanager` / `avdmanager` are installed.
+The default backend is **mock** (simulated delays, no real devices). Set **`EMULATOR_BACKEND=sdk`** to run **real Android Emulator** processes using the same **Android SDK** layout as the CLI (`$ANDROID_HOME/emulator/emulator` and `$ANDROID_HOME/platform-tools/adb`). With **`sdk`**, each emulator uses a **per-session AVD** under **`EMULATOR_QCOW2_SESSION_ROOT`** (default: **`.moboclaw_qcow2_sessions`** in the process working directory): **`userdata-qemu.img.qcow2`** (the filename used when **`userdata.useQcow2`** is true) is a **QCOW2 overlay** on top of the golden AVD’s **`userdata-qemu.img`** (or a flattened branch image), so multiple concurrent instances do not copy multi‑GB trees. The warm pool starts one process per slot (see **`EMULATOR_WARM_POOL_SIZE`**). **Docker Compose** does not include the Android SDK—use **mock** in containers, or run **`sdk` on the host** where Studio / `sdkmanager` / `avdmanager` are installed.
 
 ### Code layout (`app/`) — MVC-style
 
@@ -12,7 +12,7 @@ The default backend is **mock** (simulated delays, no real devices). Set **`EMUL
 |-------|--------|----------------|
 | **Entry** | `main.py` | FastAPI app, lifespan, routers. |
 | **Controller** | `controllers/system.py`, `emulators.py`, `users_sessions.py`, `missions.py` | HTTP routes. |
-| **Service** | `emulator_service`, `warm_pool`, `health_monitor`, `emulator_backend`, `android_sdk_emulator`, `snapshot_capture`, `emulator_lifecycle`, `snapshots`, `simulation`, `ids` | Part 1 emulator orchestration. |
+| **Service** | `emulator_service`, `warm_pool`, `health_monitor`, `emulator_backend`, `android_sdk_emulator`, `qcow2_avd`, `qcow2_metadata`, `snapshot_capture`, `emulator_lifecycle`, `snapshots`, `simulation`, `ids` | Part 1 emulator orchestration. |
 | | `session_service`, `session_health_worker` | Part 2 sessions + tiered health worker. |
 | | `mission_service` | Part 3 missions (scheduler, identity gate, webhooks). |
 | **DB** | `db/engine.py`, `db/orm.py`, `db/init_db.py`, `db/deps.py` | Async SQLAlchemy + **SQLite** (`aiosqlite`). |
@@ -99,6 +99,9 @@ Part 2 uses **SQLite** by default (`./sessions.db` next to the app, or `/app/dat
 | `AVD_NAME` | `Pixel_6_API_34` | AVD name as shown by `emulator -list-avds` / **Device Manager**. |
 | `EMULATOR_EMULATOR_BINARY` / `EMULATOR_ADB_BINARY` | _(unset)_ | Override paths to `emulator` and `adb` if not under the default SDK layout. |
 | `EMULATOR_EMULATOR_EXTRA_ARGS` | _(see `config.py`)_ | Extra CLI args for each emulator (quoted list: `-no-window -no-audio` …). |
+| `EMULATOR_EMULATOR_UI_MODE` | `headless` | Set to **`window`** to show the emulator UI (strips `-no-window` from extra args; macOS prototype). |
+| `EMULATOR_QCOW2_SESSION_ROOT` | _(unset)_ | Directory for per-session AVD trees + **`branches/*.qcow2`**; default **`<cwd>/.moboclaw_qcow2_sessions`**. |
+| `EMULATOR_QEMU_IMG_BINARY` | _(unset)_ | Path to **`qemu-img`**; default **`$ANDROID_SDK_ROOT/emulator/qemu-img`**. |
 | `EMULATOR_EMULATOR_PORT_START` | `5554` | First **console** port; additional instances use +2, +4, … (`emulator-5554`, …). |
 | `EMULATOR_EMULATOR_BOOT_COMPLETED_TIMEOUT_SECONDS` | `420` | Max wait for `sys.boot_completed=1` after `adb` sees the serial. |
 | `WARM_POOL_SIZE` | `3` | Target count of **warm idle** emulators (base snapshot, ready to assign). |
@@ -127,17 +130,21 @@ export EMULATOR_AVD_NAME=Your_Avd_Name
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-### Layered snapshots
+### Layered snapshots (v1: QCOW2 branches, no ADB snapshots)
 
-With **`EMULATOR_BACKEND=sdk`**, `POST /emulators/{id}/snapshot` runs **`adb emu avd snapshot save`** and stores the AVD snapshot name in **`metadata.sdk_snapshot_name`**. Provisioning from that snapshot uses **`adb emu avd snapshot load`** (warm) or **`-snapshot`** on a cold boot. Snapshots created in **mock** mode cannot be restored on **sdk** until you capture them again on a device.
+With **`EMULATOR_BACKEND=sdk`**, **`POST /emulators/{id}/snapshot`** does **not** use **`adb emu avd snapshot`**. The service **stops** the emulator, runs **`qemu-img convert`** to write a **flattened** qcow2 under **`branches/<snapshot_id>.qcow2`** in **`EMULATOR_QCOW2_SESSION_ROOT`**, and stores **`metadata.qcow2_userdata_path`** (and **`qcow2_format`: `flat_qcow2`**) on the snapshot record. That emulator instance is **removed** after capture; provision a new one to continue.
 
-In **mock** mode, the same API is simulated:
+**`POST /emulators`** with **`snapshot_id`** pointing at a branch loads **`metadata.qcow2_userdata_path`** as the qcow2 **backing** for a new session overlay (cold boot; **`BASE`** still uses the warm pool when available).
 
-1. **Base** — seeded `snap-base-default` (“clean Android”) on startup.
+In **mock** mode, the same API is simulated (no real disk artifacts):
+
+1. **Base** — seeded **`snap-base-default`** (“clean Android”) on startup (`metadata.qcow2_branch_kind`: **`golden`**).
 2. **App** — `POST /emulators/{id}/snapshot` with `layer: "app"`.
 3. **Session** — same endpoint with `layer: "session"` (per-user login state in a real system).
 
-Each snapshot stores `parent_snapshot_id` so the chain base → app → session is explicit.
+Each snapshot stores **`parent_snapshot_id`** so the chain base → app → session is explicit.
+
+**Troubleshooting (sdk):** If you see **`qcow2: Image is corrupt`** or emulators exit with **signal 9** (OOM), stop other emulators, remove the session tree **`./.moboclaw_qcow2_sessions`** (or your **`EMULATOR_QCOW2_SESSION_ROOT`**), and try **`EMULATOR_WARM_POOL_SIZE=1`** while testing. Ensure no other process is booting the **same golden AVD** read-write at the same time.
 
 ### API
 
@@ -204,6 +211,8 @@ Provision an emulator **restored from** a snapshot (defaults to base).
   "parent_snapshot_id": "snap-base-default"
 }
 ```
+
+With **`EMULATOR_BACKEND=sdk`**, the stored snapshot record includes qcow2 metadata (for example **`qcow2_userdata_path`**, **`qcow2_format`**, **`qcow2_parent_snapshot_id`**); use that path when provisioning from **`snapshot_id`**.
 
 #### `DELETE /emulators/{id}`
 
