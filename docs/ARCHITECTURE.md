@@ -41,6 +41,12 @@ Shutdown: cancel session worker task; stop emulator background tasks.
 
 Details: parallel chains and gate behavior in code (`app/services/mission_service.py`).
 
+## Mission concurrency and real SDK emulators
+
+Targets are grouped by **`app_package`**: each distinct app runs its chain **concurrently** with other apps (`asyncio.gather`). Every task that passes the session gate calls **`EmulatorService.provision`**, so **N** concurrent app groups can mean **N** live emulator processes at once. On a workstation (especially macOS without KVM), that can exhaust CPU, RAM, or disk I/O.
+
+**Mitigations today:** keep missions small (one app per mission while testing), lower **`EMULATOR_WARM_POOL_SIZE`**, and avoid overlapping heavy work. **Future extension:** a process-wide semaphore (or queue) around **`provision`** could cap concurrent real emulators without changing route contracts.
+
 ## Identity gate (single process)
 
 Approve uses in-memory `asyncio.Event` per `(mission_id, task_id)`. **Single replica only**; multiple workers would need Redis/DB/messages for coordination.

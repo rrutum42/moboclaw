@@ -91,6 +91,19 @@ Open **`http://127.0.0.1:8080/docs`**.
 
 **First-time host prep:** see [Scripts: AVD and Android emulator prerequisites](#scripts-avd-and-android-emulator-prerequisites-scripts) above.
 
+### SDK environment verification (macOS)
+
+Before relying on missions or scripted flows, confirm the shell the API runs in can see the toolchain:
+
+| Check | Command / expectation |
+|--------|----------------------|
+| `emulator` on `PATH` | `which emulator` → under `$ANDROID_HOME/emulator` |
+| `adb` on `PATH` | `which adb` → under `$ANDROID_HOME/platform-tools` |
+| AVD name matches config | `emulator -list-avds` includes **`EMULATOR_AVD_NAME`** (e.g. `Pixel_6_API_34`) |
+| API sees SDK backend | Process env: `EMULATOR_BACKEND=sdk`; optional `EMULATOR_ANDROID_SDK_ROOT` if not using `ANDROID_HOME` |
+
+**Warm pool:** use `EMULATOR_WARM_POOL_SIZE=1` on a laptop unless you have RAM and disk for multiple full AVD clones.
+
 ---
 
 ## 3. Check that the API is up
@@ -119,13 +132,49 @@ These assume the API is already running (`uvicorn`).
 | Script | Purpose |
 |--------|---------|
 | [scripts/test_sessions.sh](../scripts/test_sessions.sh) | Curl flow: mint path, pick/provision emulator, session snapshot, **verify** session (set **`BASE`** if not `http://127.0.0.1:8080`). |
+| [scripts/test_mission_parallel_and_sequence.sh](../scripts/test_mission_parallel_and_sequence.sh) | **`com.example.calculator`** + **`com.dream11.app`**: branch snapshot, verify both, mission with four targets interleaved (parallel per-app chains, sequential steps inside each app). |
 | [scripts/snapshot_app_then_provision.sh](../scripts/snapshot_app_then_provision.sh) | **`GET /emulators?running_only=true`**, take an **app**-layer snapshot of a running emulator, then **`POST /emulators`** from that snapshot (set **`BASE_URL`** if needed). |
 
 AVD/SDK setup scripts are listed [above](#scripts-avd-and-android-emulator-prerequisites-scripts).
 
 ---
 
-## Troubleshooting (local SDK)
+## 6. End-to-end: branch snapshot, verify, mission (SDK)
+
+Missions call the same **`EmulatorService.provision`** as **`POST /emulators`**. For a **non-base** snapshot, capture it via Part 1 first, attach it to the user session, then run the mission.
+
+Assume API at **`BASE=http://127.0.0.1:8080`** and `EMULATOR_BACKEND=sdk` with a working golden AVD.
+
+```bash
+BASE=http://127.0.0.1:8080
+
+# 1) User id (or use an existing seeded user)
+USER_ID=$(curl -sS -X POST "$BASE/users" | jq -r .user_id)
+
+# 2) Provision from base; capture an app (or session) layer snapshot — produces a catalog id + AVD clone metadata
+EMU=$(curl -sS -X POST "$BASE/emulators" -H 'Content-Type: application/json' -d '{}' | jq -r .id)
+SNAP=$(curl -sS -X POST "$BASE/emulators/$EMU/snapshot" \
+  -H 'Content-Type: application/json' \
+  -d '{"layer":"app","label":"demo_app"}' | jq -r .snapshot_id)
+
+# 3) Tie session to that snapshot for your app package (must exist in snapshots table / hydrated store)
+curl -sS -X POST "$BASE/users/$USER_ID/sessions/com.example.app/verify" \
+  -H 'Content-Type: application/json' \
+  -d "{\"login_method\":\"otp\",\"snapshot_id\":\"$SNAP\"}" | jq
+
+# 4) Mission: tasks for that app_package provision from the session snapshot, then tear down
+MID=$(curl -sS -X POST "$BASE/missions" -H 'Content-Type: application/json' \
+  -d "{\"user_id\":\"$USER_ID\",\"targets\":[{\"app_package\":\"com.example.app\",\"goal\":\"demo\"}]}" \
+  | jq -r .mission_id)
+
+curl -sS "$BASE/missions/$MID" | jq
+```
+
+If **`snapshot_id`** is wrong or metadata is incomplete, mission tasks fail at provision (same as a bad **`POST /emulators`** body). **`com.example.app`** must match the **`app_package`** used in **verify**.
+
+---
+
+## 7. Troubleshooting (local SDK)
 
 | Symptom | What to try |
 |---------|-------------|

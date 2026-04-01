@@ -33,6 +33,7 @@ class MissionState(str, enum.Enum):
     running = "running"
     done = "done"
     failed = "failed"
+    re_auth_required = "re_auth_required"
 
 
 class MissionTaskState(str, enum.Enum):
@@ -43,6 +44,7 @@ class MissionTaskState(str, enum.Enum):
     completing = "completing"
     done = "done"
     failed = "failed"
+    re_auth_required = "re_auth_required"
 
 
 class User(Base):
@@ -155,6 +157,7 @@ class MissionTask(Base):
         DateTime(timezone=True), nullable=True
     )
     error_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    re_auth_login_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

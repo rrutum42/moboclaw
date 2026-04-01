@@ -54,6 +54,7 @@ def _task_to_out(t: MissionTask) -> MissionTaskOut:
         state=t.state,
         emulator_id=t.emulator_id,
         error_message=t.error_message,
+        re_auth_login_method=t.re_auth_login_method,
         identity_gate_notified_at=t.identity_gate_notified_at,
         created_at=t.created_at,
         updated_at=t.updated_at,
@@ -64,6 +65,8 @@ def compute_mission_state(tasks: Iterable[MissionTask]) -> str:
     states = [t.state for t in tasks]
     if any(s == MissionTaskState.failed.value for s in states):
         return MissionState.failed.value
+    if any(s == MissionTaskState.re_auth_required.value for s in states):
+        return MissionState.re_auth_required.value
     if all(s == MissionTaskState.done.value for s in states):
         return MissionState.done.value
     if all(s == MissionTaskState.queued.value for s in states):
@@ -243,16 +246,18 @@ async def _run_one_task(
             await _sync_mission_aggregate(mission_id)
             return False
 
-        # Expired session = re-auth required; do not allocate.
+        # Expired session: flag task for re-auth (login method from session); do not fail the mission.
         if sess.health == SessionHealth.expired.value:
-            log.warning(
-                "mission task failed: expired session user=%s app=%s task_id=%s",
+            log.info(
+                "mission task re_auth_required: expired session user=%s app=%s task_id=%s login_method=%s",
                 user_id,
                 task.app_package,
                 task_id,
+                sess.login_method,
             )
-            task.state = MissionTaskState.failed.value
-            task.error_message = "re_auth_required: session health expired"
+            task.state = MissionTaskState.re_auth_required.value
+            task.re_auth_login_method = sess.login_method
+            task.error_message = None
             await db.commit()
             await _sync_mission_aggregate(mission_id)
             return False
@@ -473,6 +478,14 @@ async def run_mission(mission_id: str, svc: EmulatorService | None = None) -> No
             failed = [t for t in all_tasks if t.state == MissionTaskState.failed.value]
             if failed:
                 miss.error_detail = failed[0].error_message or "task failed"
+        elif miss.state == MissionState.re_auth_required.value and not miss.error_detail:
+            ra = [t for t in all_tasks if t.state == MissionTaskState.re_auth_required.value]
+            if ra:
+                t0 = ra[0]
+                lm = t0.re_auth_login_method or "unknown"
+                miss.error_detail = (
+                    f"re_auth_required app={t0.app_package} login_method={lm}"
+                )
         await db.commit()
         log.info(
             "mission run finished id=%s state=%s error_detail=%s",

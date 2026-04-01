@@ -32,7 +32,7 @@ The **snapshot catalog** is stored in **`snapshots`** (layer, parent, label, JSO
 | `parent_snapshot_id` | Optional FK → `snapshots.id`. |
 | `label` | Optional. |
 | `created_at` | Timestamp. |
-| `snapshot_metadata` | JSON (qcow2 paths, AVD names, mock flags, etc.). |
+| `snapshot_metadata` | JSON (e.g. AVD clone paths for **`EMULATOR_BACKEND=sdk`** branch restores; mock flags). Must align with **`SnapshotRecord.metadata`** in the Part 1 store after hydrate. |
 
 ### `users`
 

@@ -24,6 +24,10 @@ class MissionTaskOut(BaseModel):
     state: str
     emulator_id: str | None = None
     error_message: str | None = None
+    re_auth_login_method: str | None = Field(
+        default=None,
+        description="When state is re_auth_required, login method from the user session (verify).",
+    )
     identity_gate_notified_at: datetime | None = None
     created_at: datetime
     updated_at: datetime

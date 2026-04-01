@@ -104,6 +104,8 @@ export EMULATOR_AVD_NAME=Pixel_6_API_34
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
+Quick checks: `which emulator`, `which adb`, and `emulator -list-avds` must include **`EMULATOR_AVD_NAME`**. Full checklist: [docs/LOCAL.md](docs/LOCAL.md#sdk-environment-verification-macos).
+
 ### Missions (`MISSION_*`)
 
 | Variable | Default | Role |
@@ -209,8 +211,10 @@ First build downloads SDK pieces (often 10+ minutes). **macOS** cannot reuse a h
 ## Part 3: Missions
 
 - Tasks need a **non-expired** session per `app_package`.  
-- Different apps run **in parallel**; same app’s tasks run **in order**.  
-- Each task **provisions** an emulator, simulates work, may enter **identity gate** (webhook + approve), then **destroys** the emulator.
+- Different apps run **in parallel**; same app’s tasks run **in order**. With **`EMULATOR_BACKEND=sdk`**, each concurrent app chain can hold a **live emulator**—see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#mission-concurrency-and-real-sdk-emulators).  
+- Each task **provisions** an emulator (same path as **`POST /emulators`**), simulates work, may enter **identity gate** (webhook + approve), then **destroys** the emulator.
+
+**Branch snapshots:** attach **`snapshot_id`** on **verify** (after capturing via Part 1) so the session row points at the catalog entry missions use. Step-by-step: [docs/LOCAL.md — section 6](docs/LOCAL.md#6-end-to-end-branch-snapshot-verify-mission-sdk).
 
 ### Part 3 API
 
@@ -257,6 +261,7 @@ Set `MISSION_IDENTITY_GATE_PROBABILITY=0` to skip the gate for quick runs.
 | Script | Purpose |
 |--------|---------|
 | `scripts/test_sessions.sh` | Curl: provision/list emulator, snapshot, verify session (`BASE` / `APP`). |
+| `scripts/test_mission_parallel_and_sequence.sh` | Calculator + Dream11 packages: snapshot → verify both sessions → mission with **interleaved** targets (two app chains **parallel**, two goals per app **sequential**). `SKIP_SNAPSHOT=1` for base-only mock runs. |
 | `scripts/snapshot_app_then_provision.sh` | Snapshot a **running** emulator at **app** layer, then provision another from that snapshot (`BASE_URL`). |
 
 ### Other
