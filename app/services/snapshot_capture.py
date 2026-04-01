@@ -22,6 +22,7 @@ from app.services.qcow2_metadata import (
     SESSION_ANDROID_AVD_HOME,
     SESSION_AVD_NAME,
 )
+from app.services.snapshot_persistence import persist_snapshot_record
 from app.store import InMemoryStore
 
 log = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ async def capture_snapshot(
             metadata=meta,
         )
         await store.add_snapshot(snap)
+        await persist_snapshot_record(snap)
         async with rec.lock:
             rec.state = EmulatorState.RUNNING
             rec.current_snapshot_id = sid
@@ -123,6 +125,7 @@ async def capture_snapshot(
             metadata=meta,
         )
         await store.add_snapshot(snap)
+        await persist_snapshot_record(snap)
     finally:
         destroy_session_avd_tree(settings, emulator_id)
         await teardown_emulator(store, emulator_id, "snapshot_avd_clone", quick=True)

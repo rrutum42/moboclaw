@@ -11,6 +11,8 @@ from app.background import start_background_workers, stop_background_workers
 from app.config import settings
 from app.controllers import emulators, missions, system, users_sessions
 from app.db.init_db import init_db
+from app.services.snapshot_persistence import hydrate_store_from_db
+from app.store import store as orchestrator_store
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +25,7 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await hydrate_store_from_db(orchestrator_store)
     workers = await start_background_workers()
     log.info(
         "emulator orchestrator started warm_pool_size=%s effective=%s warm_boot_read_only=%s",

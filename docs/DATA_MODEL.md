@@ -5,22 +5,34 @@ ORM: `app/db/orm.py`. Driver: **async SQLAlchemy** + **SQLite** (`aiosqlite`).
 ## Relationships (conceptual)
 
 ```text
+Snapshot (snapshots)       — catalog; same ids as orchestrator SnapshotRecord
 User (users)
-  ├── UserSession (many)     — unique (user_id, app_package)
+  ├── UserSession (many)     — unique (user_id, app_package); optional FK → snapshots.id
   │       └── SessionHealthEvent (many)
   └── Mission (many)
           └── MissionTask (many)
 ```
 
-- **`users.id`**: string primary key (you pass it in URLs; **`verify`** can create the row if missing).
+- **`users.id`**: string primary key. Prefer **`POST /users`** (server-minted UUID); **`verify`** can still create the row if missing.
 - **`user_sessions`**: integer **`id`** is returned as **`session_id`** in JSON.
-- **`snapshot_id`** on a session: optional string referencing Part 1 snapshot ids (same strings as in `InMemoryStore.snapshots`).
+- **`snapshot_id`** on a session: optional FK to **`snapshots.id`** (same strings as `InMemoryStore.snapshots`).
 
-Part 1 **emulator runtime** and the **snapshot catalog** are **not** in these tables; they live in memory. Restarting the API clears in-memory snapshots unless the base snapshot is seeded again on startup.
+The **snapshot catalog** is stored in **`snapshots`** (layer, parent, label, JSON metadata). On API startup, rows are **hydrated** into the in-memory store so provisioning survives restarts.
 
 ---
 
 ## Tables
+
+### `snapshots`
+
+| Column | Description |
+|--------|-------------|
+| `id` | String PK; same id returned by `POST /emulators/.../snapshot`. |
+| `layer` | `base` / `app` / `session`. |
+| `parent_snapshot_id` | Optional FK → `snapshots.id`. |
+| `label` | Optional. |
+| `created_at` | Timestamp. |
+| `snapshot_metadata` | JSON (qcow2 paths, AVD names, mock flags, etc.). |
 
 ### `users`
 
@@ -36,7 +48,7 @@ Part 1 **emulator runtime** and the **snapshot catalog** are **not** in these ta
 | `id` | Autoincrement PK (exposed as `session_id`). |
 | `user_id` | FK → `users.id` (CASCADE delete). |
 | `app_package` | Android package name; unique with `user_id`. |
-| `snapshot_id` | Optional; Part 1 snapshot id for provisioning. |
+| `snapshot_id` | Optional FK → `snapshots.id` for provisioning. |
 | `health` | `alive` / `expired` / `unknown`. |
 | `last_verified_at`, `last_access_at` | Nullable datetimes. |
 | `login_method` | e.g. `otp`, `sso`, `password`. |

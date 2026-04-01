@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -56,6 +57,25 @@ class User(Base):
     missions: Mapped[list[Mission]] = relationship(back_populates="user")
 
 
+class Snapshot(Base):
+    """Durable snapshot catalog (mirrors in-memory SnapshotRecord for provision after restart)."""
+
+    __tablename__ = "snapshots"
+
+    id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    layer: Mapped[str] = mapped_column(String(32))
+    parent_snapshot_id: Mapped[str | None] = mapped_column(
+        String(512), ForeignKey("snapshots.id", ondelete="SET NULL"), nullable=True
+    )
+    label: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    snapshot_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    user_sessions: Mapped[list[UserSession]] = relationship(back_populates="snapshot")
+
+
 class UserSession(Base):
     __tablename__ = "user_sessions"
     __table_args__ = (UniqueConstraint("user_id", "app_package", name="uq_user_app"),)
@@ -63,7 +83,9 @@ class UserSession(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(256), ForeignKey("users.id", ondelete="CASCADE"))
     app_package: Mapped[str] = mapped_column(String(512))
-    snapshot_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    snapshot_id: Mapped[str | None] = mapped_column(
+        String(512), ForeignKey("snapshots.id", ondelete="SET NULL"), nullable=True
+    )
     health: Mapped[str] = mapped_column(String(32), default=SessionHealth.unknown.value)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_access_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -71,6 +93,7 @@ class UserSession(Base):
     tier: Mapped[str] = mapped_column(String(32), default=SessionTier.cold.value)
 
     user: Mapped[User] = relationship(back_populates="sessions")
+    snapshot: Mapped[Snapshot | None] = relationship(back_populates="user_sessions")
     health_events: Mapped[list[SessionHealthEvent]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )

@@ -15,9 +15,18 @@ from app.db.orm import (
     UserSession,
 )
 from app.services.session_service import apply_tier, utcnow
+from app.services.snapshot_persistence import ensure_snapshots_for_seed
+from app.services.snapshots import base_snapshot_record, travel_seed_snapshot_record
 from app.session_config import session_settings
 
 log = logging.getLogger(__name__)
+
+
+async def seed_reference_snapshots() -> None:
+    """Ensure catalog rows exist for FK references used by seeded sessions."""
+    await ensure_snapshots_for_seed(
+        [base_snapshot_record(), travel_seed_snapshot_record()]
+    )
 
 
 async def seed_dummy_sessions_if_empty() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+import uuid
 from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ from app.schemas.sessions import (
     VerifySessionResponse,
 )
 from app.session_config import session_settings
+from app.services.snapshot_persistence import snapshot_exists
 
 
 def utcnow() -> datetime:
@@ -62,6 +64,14 @@ async def ensure_user(db: AsyncSession, user_id: str) -> User:
     db.add(u)
     await db.flush()
     return u
+
+
+async def mint_user(db: AsyncSession) -> str:
+    """Create a new user with a server-generated id (UUID)."""
+    uid = str(uuid.uuid4())
+    db.add(User(id=uid))
+    await db.commit()
+    return uid
 
 
 def _entry_from_session(s: UserSession) -> SessionEntry:
@@ -105,6 +115,9 @@ async def verify_session(
     now = utcnow()
     lm = (body.login_method if body and body.login_method else None) or LoginMethod.otp.value
     snap = body.snapshot_id if body else None
+
+    if snap is not None and not await snapshot_exists(db, snap):
+        raise ValueError(f"unknown snapshot_id={snap}")
 
     if session is None:
         session = UserSession(

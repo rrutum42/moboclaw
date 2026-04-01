@@ -14,9 +14,18 @@ from app.schemas.sessions import (
     VerifySessionRequest,
     VerifySessionResponse,
 )
+from app.schemas.users import CreateUserResponse
 from app.services import session_service
 
 router = APIRouter(prefix="/users", tags=["sessions"])
+
+
+@router.post("", response_model=CreateUserResponse, status_code=201)
+async def create_user(
+    db: AsyncSession = Depends(get_db),
+) -> CreateUserResponse:
+    user_id = await session_service.mint_user(db)
+    return CreateUserResponse(user_id=user_id)
 
 
 @router.get("/{user_id}/sessions", response_model=SessionsListResponse)
@@ -34,7 +43,10 @@ async def verify_user_session(
     db: AsyncSession = Depends(get_db),
     body: VerifySessionRequest | None = Body(None),
 ) -> VerifySessionResponse:
-    return await session_service.verify_session(db, user_id, app_package, body)
+    try:
+        return await session_service.verify_session(db, user_id, app_package, body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/{user_id}/sessions/{app_package}/health-history", response_model=HealthHistoryResponse)
