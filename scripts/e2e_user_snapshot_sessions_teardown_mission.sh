@@ -132,7 +132,7 @@ state=""
 while true; do
   state=$(curl -sS "$BASE/missions/$MID" | jq -r .state)
   echo "[e2e] mission state=$state"
-  if [[ "$state" == "done" || "$state" == "failed" ]]; then
+  if [[ "$state" == "done" || "$state" == "failed" || "$state" == "re_auth_required" ]]; then
     break
   fi
   if [[ $(date +%s) -ge $deadline ]]; then
@@ -140,10 +140,16 @@ while true; do
     curl -sS "$BASE/missions/$MID" | jq
     exit 1
   fi
-  sleep 1
+  sleep 30
 done
 
 curl -sS "$BASE/missions/$MID" | jq
+
+if [[ "$state" == "re_auth_required" ]]; then
+  echo "[e2e] Mission finished re_auth_required (expected if a session was expired on /verify)." >&2
+  echo "[e2e] Fix: start API with SESSION_MOCK_LOGGED_IN_PROBABILITY=1, or re-verify the app until health is alive." >&2
+  exit 1
+fi
 
 if [[ "$state" != "done" ]]; then
   echo "[e2e] ERROR: mission ended with state=$state" >&2

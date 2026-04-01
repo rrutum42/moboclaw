@@ -74,6 +74,36 @@ def compute_mission_state(tasks: Iterable[MissionTask]) -> str:
     return MissionState.running.value
 
 
+def _attach_mission_error_detail_if_needed(m: Mission, tasks: list[MissionTask]) -> None:
+    """Set human-readable error_detail when absent (lazy re-auth, first failure)."""
+    if m.error_detail:
+        return
+    if m.state == MissionState.failed.value:
+        failed = [t for t in tasks if t.state == MissionTaskState.failed.value]
+        if failed:
+            t0 = min(failed, key=lambda x: x.sequence)
+            m.error_detail = t0.error_message or "task failed"
+    elif m.state == MissionState.re_auth_required.value:
+        ra = [t for t in tasks if t.state == MissionTaskState.re_auth_required.value]
+        if ra:
+            t0 = min(ra, key=lambda x: x.sequence)
+            lm = t0.re_auth_login_method or "unknown"
+            m.error_detail = f"re_auth_required app={t0.app_package} login_method={lm}"
+
+
+def _re_auth_summary_for_response(
+    state: str, tasks: list[MissionTask]
+) -> tuple[str | None, str | None]:
+    """Mission-level re-auth hints when aggregate state is re_auth_required."""
+    if state != MissionState.re_auth_required.value:
+        return None, None
+    ra = [t for t in tasks if t.state == MissionTaskState.re_auth_required.value]
+    if not ra:
+        return None, None
+    t0 = min(ra, key=lambda x: x.sequence)
+    return t0.app_package, t0.re_auth_login_method
+
+
 async def _get_gate_event(mission_id: str, task_id: str) -> asyncio.Event:
     async with _gate_lock:
         key = (mission_id, task_id)
@@ -187,7 +217,24 @@ async def _sync_mission_aggregate(mission_id: str) -> None:
         if not m:
             return
         m.state = compute_mission_state(tasks)
+        _attach_mission_error_detail_if_needed(m, tasks)
         await db.commit()
+
+
+async def _clear_emulator_on_tasks(task_ids: list[str]) -> None:
+    """Clear emulator_id after shared emulator teardown (avoids stale ids in API)."""
+    if not task_ids:
+        return
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(select(MissionTask).where(MissionTask.task_id.in_(task_ids)))
+        rows = list(r.scalars().all())
+        if not rows:
+            return
+        mid = rows[0].mission_id
+        for t in rows:
+            t.emulator_id = None
+        await db.commit()
+        await _sync_mission_aggregate(mid)
 
 
 async def _fire_webhook(webhook_url: str, payload: dict) -> None:
@@ -211,13 +258,19 @@ async def _fire_webhook(webhook_url: str, payload: dict) -> None:
         log.warning("identity_gate webhook failed url=%s: %s", webhook_url, e)
 
 
-async def _run_one_task(
+async def _run_mission_task(
     mission_id: str,
     user_id: str,
     task_id: str,
     svc: EmulatorService,
+    emu_holder: list[str | None],
 ) -> bool:
-    """One mission task: session gate → provision → simulated work → optional identity gate → teardown → done."""
+    """One mission task on a shared or new emulator.
+
+    `emu_holder` is a single-element list: ``[None]`` before first provision, then the emulator id
+    for all tasks in the app chain. The chain runner destroys once after all tasks (except identity
+    gate timeout, which clears the holder after destroy).
+    """
     async with AsyncSessionLocal() as db:
         r = await db.execute(select(MissionTask).where(MissionTask.task_id == task_id))
         task = r.scalar_one_or_none()
@@ -229,7 +282,6 @@ async def _run_one_task(
             )
             return False
 
-        # Require a persisted user session; fail before touching emulators.
         sess = await _load_session_for_app(db, user_id, task.app_package)
         await db.flush()
 
@@ -246,7 +298,6 @@ async def _run_one_task(
             await _sync_mission_aggregate(mission_id)
             return False
 
-        # Expired session: flag task for re-auth (login method from session); do not fail the mission.
         if sess.health == SessionHealth.expired.value:
             log.info(
                 "mission task re_auth_required: expired session user=%s app=%s task_id=%s login_method=%s",
@@ -275,17 +326,18 @@ async def _run_one_task(
         snapshot_id,
     )
 
-    emulator_id: str | None = None
+    emulator_id: str | None = emu_holder[0]
     try:
-        # Boot mock emulator from session snapshot (or base).
-        prov = await svc.provision(snapshot_id)
-        emulator_id = prov.id
+        if emulator_id is None:
+            prov = await svc.provision(snapshot_id)
+            emulator_id = prov.id
+            emu_holder[0] = emulator_id
+
+        assert emulator_id is not None
         await _patch_task(task_id, state=MissionTaskState.executing.value, emulator_id=emulator_id)
 
-        # Stand-in for agent / vision work.
         await asyncio.sleep(mission_settings.execute_sim_seconds)
 
-        # Optional pause: webhook + wait for approve or timeout.
         if random.random() < mission_settings.identity_gate_probability:
             log.info(
                 "mission task identity_gate entered mission_id=%s task_id=%s",
@@ -339,30 +391,25 @@ async def _run_one_task(
                         await svc.destroy_emulator(emulator_id)
                     except Exception as e:
                         log.warning("destroy after gate timeout: %s", e)
+                emu_holder[0] = None
                 await _release_gate_event(mission_id, task_id)
                 return False
             finally:
                 await _release_gate_event(mission_id, task_id)
 
-        # Release emulator and mark task finished.
         await _patch_task(task_id, state=MissionTaskState.completing.value)
-
-        if emulator_id:
-            try:
-                await svc.destroy_emulator(emulator_id)
-            except Exception as e:
-                log.warning("destroy emulator %s: %s", emulator_id, e)
 
         await _patch_task(
             task_id,
             state=MissionTaskState.done.value,
-            clear_emulator=True,
+            clear_emulator=False,
         )
         log.info(
-            "mission task done mission_id=%s task_id=%s app=%s",
+            "mission task done mission_id=%s task_id=%s app=%s emulator=%s",
             mission_id,
             task_id,
             app_package,
+            emulator_id,
         )
         return True
 
@@ -372,17 +419,11 @@ async def _run_one_task(
             task_id,
             e,
         )
-        # e.g. unknown snapshot_id from provision.
         await _patch_task(
             task_id,
             state=MissionTaskState.failed.value,
             error_message=str(e),
         )
-        if emulator_id:
-            try:
-                await svc.destroy_emulator(emulator_id)
-            except Exception:
-                pass
         return False
     except Exception as e:
         log.exception("task %s failed", task_id)
@@ -391,11 +432,6 @@ async def _run_one_task(
             state=MissionTaskState.failed.value,
             error_message=str(e)[:2000],
         )
-        if emulator_id:
-            try:
-                await svc.destroy_emulator(emulator_id)
-            except Exception:
-                pass
         return False
 
 
@@ -405,10 +441,22 @@ async def _run_app_chain(
     chain: list[MissionTask],
     svc: EmulatorService,
 ) -> None:
-    for task in chain:
-        ok = await _run_one_task(mission_id, user_id, task.task_id, svc)
-        if not ok:
-            break
+    emu_holder: list[str | None] = [None]
+    chain_ids = [t.task_id for t in chain]
+    try:
+        for task in chain:
+            ok = await _run_mission_task(mission_id, user_id, task.task_id, svc, emu_holder)
+            if not ok:
+                break
+    finally:
+        eid = emu_holder[0]
+        if eid:
+            try:
+                await svc.destroy_emulator(eid)
+            except Exception as e:
+                log.warning("destroy emulator at end of app chain: %s", e)
+        emu_holder[0] = None
+        await _clear_emulator_on_tasks(chain_ids)
 
 
 async def run_mission(mission_id: str, svc: EmulatorService | None = None) -> None:
@@ -474,18 +522,7 @@ async def run_mission(mission_id: str, svc: EmulatorService | None = None) -> No
         if not miss:
             return
         miss.state = compute_mission_state(all_tasks)
-        if miss.state == MissionState.failed.value and not miss.error_detail:
-            failed = [t for t in all_tasks if t.state == MissionTaskState.failed.value]
-            if failed:
-                miss.error_detail = failed[0].error_message or "task failed"
-        elif miss.state == MissionState.re_auth_required.value and not miss.error_detail:
-            ra = [t for t in all_tasks if t.state == MissionTaskState.re_auth_required.value]
-            if ra:
-                t0 = ra[0]
-                lm = t0.re_auth_login_method or "unknown"
-                miss.error_detail = (
-                    f"re_auth_required app={t0.app_package} login_method={lm}"
-                )
+        _attach_mission_error_detail_if_needed(miss, all_tasks)
         await db.commit()
         log.info(
             "mission run finished id=%s state=%s error_detail=%s",
@@ -567,12 +604,15 @@ async def get_mission(db: AsyncSession, mission_id: str) -> MissionDetailRespons
     if not m:
         return None
     tasks = sorted(m.tasks, key=lambda t: t.sequence)
+    ra_pkg, ra_lm = _re_auth_summary_for_response(m.state, tasks)
     return MissionDetailResponse(
         mission_id=m.id,
         user_id=m.user_id,
         state=m.state,
         webhook_url=m.webhook_url,
         error_detail=m.error_detail,
+        re_auth_app_package=ra_pkg,
+        re_auth_login_method=ra_lm,
         tasks=[_task_to_out(t) for t in tasks],
         created_at=m.created_at,
         updated_at=m.updated_at,

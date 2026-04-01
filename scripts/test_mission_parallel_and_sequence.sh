@@ -4,7 +4,8 @@
 # Mission shape (see app/services/mission_service.py run_mission):
 #   - Targets are grouped by app_package. Each group runs as one asyncio task; groups run in
 #     parallel (asyncio.gather).
-#   - Within one app_package, tasks run in sequence (order of `targets` in the request).
+#   - Within one app_package, tasks run in sequence (order of `targets` in the request), sharing
+#     one emulator for the whole chain (provision once, destroy once after the chain).
 #
 # This script submits four targets in *interleaved* order:
 #   seq0  calculator   — first task for app A
