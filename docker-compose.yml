@@ -8,6 +8,7 @@ services:
     volumes:
       - sqlite-data:/app/data
     environment:
+      # Use EMULATOR_BACKEND=sdk only on a host with Android SDK + AVD; default mock works in Docker.
       EMULATOR_WARM_POOL_SIZE: "3"
       EMULATOR_RESTORE_FROM_SNAPSHOT_SECONDS: "2.5"
       EMULATOR_COLD_BOOT_SECONDS: "8"

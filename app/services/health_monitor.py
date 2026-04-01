@@ -7,7 +7,7 @@ from typing import Awaitable, Callable
 
 from app.config import Settings
 from app.models import EmulatorState, HealthEvent, utcnow
-from app.services.simulation import mock_health_probe
+from app.services.emulator_backend import EmulatorBackend
 from app.store import InMemoryStore
 
 log = logging.getLogger(__name__)
@@ -22,11 +22,13 @@ class HealthMonitor:
         settings: Settings,
         health_history: deque[HealthEvent],
         on_unhealthy: OnUnhealthy,
+        backend: EmulatorBackend,
     ) -> None:
         self._store = store
         self._settings = settings
         self._history = health_history
         self._on_unhealthy = on_unhealthy
+        self._backend = backend
 
     async def run_loop(self, shutdown: asyncio.Event) -> None:
         try:
@@ -43,13 +45,14 @@ class HealthMonitor:
                 if not rec or rec.state != EmulatorState.RUNNING:
                     continue
 
-                ok = mock_health_probe(self._settings)
+                ok = await self._backend.health_probe(eid)
+                detail = "sdk-adb" if self._settings.backend == "sdk" else "mock-probe"
                 self._history.append(
                     HealthEvent(
                         timestamp=utcnow(),
                         emulator_id=eid,
                         ok=ok,
-                        detail="mock-probe",
+                        detail=detail,
                     )
                 )
 

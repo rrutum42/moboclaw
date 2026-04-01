@@ -4,7 +4,7 @@ This repo implements the take-home in parts. **Part 1 (emulator orchestration)**
 
 ## Part 1: Emulator orchestration (prototype)
 
-The service uses a **mock Android emulator backend** that preserves the **REST contract and lifecycle** (create/start/stop/snapshot/teardown). Swap the mock for AOSP / Docker Android / Genymotion by implementing the same operations behind `EmulatorService` / `WarmPool` (see layout below).
+The default backend is **mock** (simulated delays, no real devices). Set **`EMULATOR_BACKEND=sdk`** to run **real Android Emulator** processes using the same **Android SDK** layout as the CLI (`$ANDROID_HOME/emulator/emulator` and `$ANDROID_HOME/platform-tools/adb`). With **`sdk`**, each emulator gets a **full clone** of the **golden** AVD (same idea as `cp -r ~/.android/avd/<golden>.avd` plus a rewritten top-level `.ini`) under **`EMULATOR_QCOW2_SESSION_ROOT`** (default: **`.moboclaw_qcow2_sessions`** in the process working directory). Branch snapshots store another **full copy** of that session tree under **`branches/<snapshot_id>/`**. Copies are large and can take noticeable disk and time; tune **`EMULATOR_WARM_POOL_SIZE`** accordingly. **Docker Compose** does not include the Android SDK—use **mock** in containers, or run **`sdk` on the host** where Studio / `sdkmanager` / `avdmanager` are installed.
 
 ### Code layout (`app/`) — MVC-style
 
@@ -12,7 +12,7 @@ The service uses a **mock Android emulator backend** that preserves the **REST c
 |-------|--------|----------------|
 | **Entry** | `main.py` | FastAPI app, lifespan, routers. |
 | **Controller** | `controllers/system.py`, `emulators.py`, `users_sessions.py`, `missions.py` | HTTP routes. |
-| **Service** | `emulator_service`, `warm_pool`, `health_monitor`, `snapshot_capture`, `emulator_lifecycle`, `snapshots`, `simulation`, `ids` | Part 1 emulator orchestration. |
+| **Service** | `emulator_service`, `warm_pool`, `health_monitor`, `emulator_backend`, `android_sdk_emulator`, `qcow2_avd`, `qcow2_metadata`, `snapshot_capture`, `emulator_lifecycle`, `snapshots`, `simulation`, `ids` | Part 1 emulator orchestration. |
 | | `session_service`, `session_health_worker` | Part 2 sessions + tiered health worker. |
 | | `mission_service` | Part 3 missions (scheduler, identity gate, webhooks). |
 | **DB** | `db/engine.py`, `db/orm.py`, `db/init_db.py`, `db/deps.py` | Async SQLAlchemy + **SQLite** (`aiosqlite`). |
@@ -50,6 +50,18 @@ Expected: `{"status":"ok"}`.
 
 OpenAPI UI: `http://localhost:8082/docs`
 
+#### Docker Compose with **real** Android emulators (`EMULATOR_BACKEND=sdk`)
+
+The default Compose file uses the **mock** emulator backend. To run **Linux** Android Emulator binaries **inside** the container (suitable for CI or Docker Desktop), use the second Compose file and **`Dockerfile.sdk`**:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sdk.yml up --build
+```
+
+The first image build downloads the Android command-line tools, emulator, platform, and a system image (large download; often 10+ minutes). The service sets **`EMULATOR_WARM_POOL_SIZE=1`** by default in `docker-compose.sdk.yml` because each slot is a full VM. **`shm_size: 2gb`** is set for the emulator.
+
+On **Linux** hosts, you can uncomment **`devices: /dev/kvm`** in `docker-compose.sdk.yml` for hardware acceleration. **Docker Desktop for Mac** does not expose `/dev/kvm`; emulators use software rendering and are slower. You cannot mount a **macOS** host `~/Library/Android/sdk` into a Linux container and run those binaries—the image installs a **Linux** SDK at **`/opt/android-sdk`**.
+
 ### Run locally (without Docker)
 
 From this directory (`moboclaw/`):
@@ -82,20 +94,62 @@ Part 2 uses **SQLite** by default (`./sessions.db` next to the app, or `/app/dat
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BACKEND` | `mock` | `mock` = simulated delays; **`sdk`** = real `emulator` + `adb` (requires `ANDROID_HOME` / `ANDROID_SDK_ROOT`). |
+| `EMULATOR_ANDROID_SDK_ROOT` | _(unset)_ | Optional SDK root override; if unset, **`ANDROID_SDK_ROOT`** or **`ANDROID_HOME`** is used. |
+| `AVD_NAME` | `Pixel_6_API_34` | AVD name as shown by `emulator -list-avds` / **Device Manager**. |
+| `EMULATOR_EMULATOR_BINARY` / `EMULATOR_ADB_BINARY` | _(unset)_ | Override paths to `emulator` and `adb` if not under the default SDK layout. |
+| `EMULATOR_EMULATOR_EXTRA_ARGS` | _(see `config.py`)_ | Extra CLI args for each emulator (quoted list: `-no-window -no-audio` …). |
+| `EMULATOR_EMULATOR_UI_MODE` | `headless` | Set to **`window`** to show the emulator UI (strips `-no-window` from extra args; macOS prototype). |
+| `EMULATOR_QCOW2_SESSION_ROOT` | _(unset)_ | Directory for per-session AVD clones + **`branches/<snapshot_id>/`**; default **`<cwd>/.moboclaw_qcow2_sessions`**. |
+| `EMULATOR_EMULATOR_PORT_START` | `5554` | First **console** port; additional instances use +2, +4, … (`emulator-5554`, …). |
+| `EMULATOR_EMULATOR_BOOT_COMPLETED_TIMEOUT_SECONDS` | `420` | Max wait for `sys.boot_completed=1` after `adb` sees the serial. |
 | `WARM_POOL_SIZE` | `3` | Target count of **warm idle** emulators (base snapshot, ready to assign). |
-| `RESTORE_FROM_SNAPSHOT_SECONDS` | `2.5` | Simulated boot when assigning from the warm pool (stays &lt; 30s). |
-| `COLD_BOOT_SECONDS` | `8` | Simulated cold boot when the pool is empty. |
+| `RESTORE_FROM_SNAPSHOT_SECONDS` | `2.5` | **Mock only:** simulated boot when assigning from the warm pool. |
+| `COLD_BOOT_SECONDS` | `8` | **Mock only:** simulated cold boot when the pool is empty. |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | `3` | Background health loop interval. |
-| `MOCK_UNHEALTHY_PROBABILITY` | `0.05` | Mock chance a probe fails (ANR/hang/boot flake). |
+| `MOCK_UNHEALTHY_PROBABILITY` | `0.05` | **Mock only:** chance a probe fails. With **`sdk`**, health uses **`adb shell getprop sys.boot_completed`**. |
 | `MAX_HEALTH_FAILURES_BEFORE_REPLACE` | `2` | Consecutive failures before **auto-replace** (destroy + replenish warm pool). |
 
-### Layered snapshots (mock)
+**SDK prerequisites (host):** install **Android SDK Command-line Tools**, **platform-tools**, **emulator**, and a **system image**; create an AVD (e.g. `avdmanager create avd` or Android Studio).
 
-1. **Base** — seeded `snap-base-default` (“clean Android”) on startup.
+On **macOS**, you can install the usual CLI pieces and create a default AVD with Homebrew via:
+
+```bash
+./scripts/install_android_emulator_prereqs_mac.sh
+```
+
+(Requires [Homebrew](https://brew.sh); installs Temurin JDK if needed, the Android command-line tools cask, copies **cmdline-tools** into **`ANDROID_HOME`**—a symlink to Homebrew’s tree breaks **`avdmanager`**—then runs `sdkmanager` and creates an AVD named `Pixel_6_API_34` unless you override `AVD_NAME` / `API_LEVEL`.)
+
+**One-time host setup (recommended before first `sdk` run):** from `moboclaw/`, run **`./scripts/host_setup_moboclaw_sdk_once.sh`**. On macOS it runs the installer above, then **deletes** **`.moboclaw_qcow2_sessions`**, then runs **`qemu-img check`** on the golden AVD’s **`userdata-qemu.img.qcow2`**. If that overlay is missing or corrupt (common cause of **`qcow2: Image is corrupt; cannot be opened read/write`**), the script removes it and rewrites **`config.ini`** / **`hardware-qemu.ini`** so the golden AVD uses **raw** **`userdata-qemu.img`** with **`userdata.useQcow2=no`**, which keeps Moboclaw’s full-directory clones consistent. Use **`SKIP_MAC_SDK_INSTALL=1`** if the SDK is already installed and you only want cache clear + userdata repair.
+
+Then run the API with the SDK backend, for example:
+
+```bash
+export ANDROID_HOME="$HOME/Library/Android/sdk"   # macOS typical path
+export EMULATOR_BACKEND=sdk
+export EMULATOR_AVD_NAME=Your_Avd_Name
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+```
+
+### Layered snapshots (full AVD directory clones, no ADB snapshots)
+
+With **`EMULATOR_BACKEND=sdk`**, **`POST /emulators/{id}/snapshot`** does **not** use **`adb emu avd snapshot`**. The service **stops** the emulator, **`adb shell sync`** (best-effort), then runs **`qemu-img commit`** on **`userdata-qemu.img.qcow2`** when present so deltas merge into **`userdata-qemu.img`**. Without that step, provisioning from a branch snapshot **drops apps and userdata**: restore rewrites inis to raw-only and **removes** the qcow2 overlay, which is where a writable emulator often keeps changes. Then it **copies** the entire session **`ANDROID_AVD_HOME`** tree to **`branches/<snapshot_id>/`** under **`EMULATOR_QCOW2_SESSION_ROOT`**. The snapshot record stores **`metadata.avd_clone_path`**, **`metadata.session_avd_name`**, **`metadata.session_android_avd_home`**, and **`metadata.avd_parent_snapshot_id`**. That emulator instance is **removed** after capture; provision a new one to continue.
+
+**`POST /emulators`** with **`snapshot_id`** pointing at a branch **copies** that stored tree into a new session directory and rewrites paths / AVD names so **`emulator -avd …`** matches the new session (cold boot; **`BASE`** still uses the warm pool when available).
+
+In **mock** mode, the same API is simulated (no real disk artifacts):
+
+1. **Base** — seeded **`snap-base-default`** (“clean Android”) on startup (`metadata.avd_branch_kind`: **`golden`**).
 2. **App** — `POST /emulators/{id}/snapshot` with `layer: "app"`.
 3. **Session** — same endpoint with `layer: "session"` (per-user login state in a real system).
 
-Each snapshot stores `parent_snapshot_id` so the chain base → app → session is explicit.
+Each snapshot stores **`parent_snapshot_id`** so the chain base → app → session is explicit.
+
+**Troubleshooting (sdk):**
+
+- **Provisioned emulator has your app, new instance does not:** Snapshots capture the **whole session AVD tree** for the **emulator id** in **`POST /emulators/{id}/snapshot`**. With a warm pool, **`GET /emulators?running_only=true`** order can put **warm_idle** rows first—use the **`id`** with **`pool_role`: `provisioned`** or set **`EMU_ID`** in **`scripts/snapshot_app_then_provision.sh`**. Apps on **`/system`** only are not in the user data partition—use **`adb install`** for **`/data`**. Keep **`EMULATOR_WARM_BOOT_READ_ONLY=false`** (default) when you need installs persisted in the cloned image.
+- **OOM / disk:** Full clones are large. If emulators exit with **signal 9** (OOM), stop other emulators, remove **`./.moboclaw_qcow2_sessions`** (or your **`EMULATOR_QCOW2_SESSION_ROOT`**), and try **`EMULATOR_WARM_POOL_SIZE=1`** while testing. Ensure no other process is booting the **same golden AVD** read-write at the same time.
+- **`adb` stuck on “waiting for device emulator-5554”** (or **`offline`** in **`adb devices`**): Stop any **other** emulator processes first (`adb devices`, quit Android Studio emulators, **`adb -s emulator-5554 emu kill`**). A leftover emulator on **5554** conflicts with Moboclaw’s first console port. Warm pool spawns are **serialized**; on slower hosts prefer **`EMULATOR_WARM_POOL_SIZE=1`**. Moboclaw rewrites golden **absolute paths** in **`hardware-qemu.ini`**, then aligns **`config.ini`** / **`hardware-qemu.ini`** to **raw** **`userdata-qemu.img`** (`userdata.useQcow2=no`), disables **`firstboot.*Snapshot`**, and removes **`userdata-qemu.img.qcow2`** in the clone so QEMU does not prefer a missing qcow2 overlay or stall on snapshot boot.
 
 ### API
 
@@ -162,6 +216,8 @@ Provision an emulator **restored from** a snapshot (defaults to base).
   "parent_snapshot_id": "snap-base-default"
 }
 ```
+
+With **`EMULATOR_BACKEND=sdk`**, the stored snapshot record includes clone metadata (**`avd_clone_path`**, **`session_avd_name`**, **`session_android_avd_home`**, **`avd_parent_snapshot_id`**); provisioning uses **`avd_clone_path`** as the source directory for the next session.
 
 #### `DELETE /emulators/{id}`
 
