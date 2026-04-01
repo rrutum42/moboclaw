@@ -191,16 +191,18 @@ First build downloads SDK pieces (often 10+ minutes). **macOS** cannot reuse a h
 
 - **Schema:** [docs/DATA_MODEL.md](docs/DATA_MODEL.md).  
 - **Behavior:** One row per `(user_id, app_package)`; tiering from `last_access_at`; mock health on **verify**; **`re_auth_required`** when health is `expired` (blocks Part 3 tasks).
+- **Snapshot catalog:** Each emulator snapshot is stored in **`snapshots`** (SQLite) with the same **`id`** as the orchestrator (`SnapshotRecord`). On startup, rows are **loaded into** the in-memory store so provision works after restart. When you send **`snapshot_id`** on verify, it must already exist in that catalog (typically captured via `POST /emulators/{id}/snapshot`).
 
 ### Part 2 API
 
 | Method | Path | Purpose |
 |--------|------|---------|
+| `POST` | `/users` | Mint a **new** user; response `{"user_id":"<uuid>"}` (HTTP 201). |
 | `GET` | `/users/{user_id}/sessions` | List sessions |
-| `POST` | `/users/{user_id}/sessions/{app_package}/verify` | Verify / touch session; optional `{"login_method","snapshot_id"}` |
+| `POST` | `/users/{user_id}/sessions/{app_package}/verify` | Verify / touch session; optional `{"login_method","snapshot_id"}`. If `snapshot_id` is set, it must be a known snapshot id. |
 | `GET` | `/users/{user_id}/sessions/{app_package}/health-history` | Health history (`?limit=`) |
 
-`user_id` is a string you supply in the path; the service can create the **user** row on first **verify** if needed.
+`user_id` is usually the UUID returned by **`POST /users`**. The service can still create the **user** row on first **verify** if you pass an existing id (e.g. demo seeds).
 
 ---
 
@@ -222,6 +224,10 @@ First build downloads SDK pieces (often 10+ minutes). **macOS** cannot reuse a h
 
 ```bash
 BASE=http://localhost:8082
+
+# Optional: mint a user (or use seeded demo-user-alpha when SESSION_SEED_DUMMY_ON_EMPTY=true)
+curl -sS -X POST "$BASE/users" | jq
+
 curl -sS -X POST "$BASE/users/demo-user-alpha/sessions/com.shop.retail/verify" \
   -H 'Content-Type: application/json' -d '{"login_method":"otp"}' | jq
 
