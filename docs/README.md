@@ -1,45 +1,62 @@
 # Moboclaw documentation
 
-This folder describes the **Mobile Agent Infrastructure** FastAPI service: mock Android emulator orchestration, SQLite-backed user sessions with tiered health checks, and mission execution with optional identity gates and webhooks.
+**Moboclaw** FastAPI service: Android emulator orchestration (mock or SDK), SQLite-backed sessions and missions, and optional identity-gate webhooks.
 
-## Contents
+## Table of contents
 
-| Document | Description |
-|----------|-------------|
-| [Overview](#overview) | On this page: product summary and system diagram |
-| [API.md](API.md) | HTTP endpoints, request/response shapes, status codes |
-| [ASSUMPTIONS_AND_LIMITATIONS.md](ASSUMPTIONS_AND_LIMITATIONS.md) | Design assumptions and known limits |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Components, data flow, background workers, scaling notes |
-| [DATA_MODEL.md](DATA_MODEL.md) | Relational schema summary (sessions + missions) |
+| Document | What it covers |
+|----------|----------------|
+| [Overview](#overview) | What the service does (this page) |
+| [LOCAL.md](LOCAL.md) | Run on your machine (venv, Uvicorn, mock vs SDK, troubleshooting) |
+| [API.md](API.md) | HTTP endpoints, bodies, responses |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Components, background workers, mission flow |
+| [DATA_MODEL.md](DATA_MODEL.md) | SQLite tables and relationships |
+| [ASSUMPTIONS_AND_LIMITATIONS.md](ASSUMPTIONS_AND_LIMITATIONS.md) | Scope and known limits |
 
-Interactive API: when the server is running, OpenAPI UI is at `/docs` (e.g. `http://localhost:8082/docs` with Docker Compose).
+**Interactive API:** with the server running, open **`/docs`** (e.g. `http://localhost:8082/docs` when Compose maps `8082:8080`).
+
+---
 
 ## Overview
 
-Moboclaw is a single process exposing REST APIs for three layers:
+### Three layers in one process
 
-1. **Emulators (Part 1)** — In-memory mock emulators with warm pool, snapshots (base → app → session), and background health probes. Swap `EmulatorService` for a real hypervisor or device farm without changing route contracts.
-2. **Sessions (Part 2)** — Per-user, per-app session rows in SQLite with mock vision health (`alive` / `expired`), tiering from `last_access_at`, and a background worker for hot/warm scheduled checks.
-3. **Missions (Part 3)** — Persisted missions and tasks; tasks grouped by `app_package` run in parallel chains; within each app, tasks run sequentially. Each task provisions a mock emulator, simulates work, may enter an **identity gate** (webhook + approve), then tears down the emulator.
+1. **Part 1 — Emulators**  
+   REST API for provisioning emulators, layered snapshots (base → app → session), warm pool, and health checks.  
+   - **Mock** backend: delays only, no real devices.  
+   - **SDK** backend: real `emulator` + `adb`, full AVD directory clones under `EMULATOR_QCOW2_SESSION_ROOT`.
+
+2. **Part 2 — Sessions**  
+   SQLite: one **`user_sessions`** row per `(user_id, app_package)`, tiered health, mock “vision” checks, **verify** endpoint.
+
+3. **Part 3 — Missions**  
+   SQLite: missions and tasks; tasks grouped by `app_package` run in parallel; within one app, tasks run in order; each task provisions an emulator, simulates work, may hit an **identity gate**, then tears down.
+
+### Where state lives
+
+| Kind | Storage |
+|------|---------|
+| Running emulators, snapshot **catalog** (Part 1) | In-memory (`InMemoryStore`); **restart clears** the catalog unless you re-seed. |
+| Users, sessions, missions, tasks | SQLite (`SESSION_DATABASE_URL`). |
 
 ### System diagram
 
 ```mermaid
 flowchart TB
-    subgraph clients["Clients"]
-        C[HTTP clients / agents]
+    subgraph clients [Clients]
+        C[HTTP clients]
     end
 
-    subgraph api["FastAPI app"]
-        R[Controllers: system, emulators, users/sessions, missions]
-        BG[Background: warm pool + health monitor + session health worker]
+    subgraph api [FastAPI]
+        R[Routers: system, emulators, users, missions]
+        BG[Background: warm pool, emulator health, session worker]
     end
 
-    subgraph mem["In-memory Part 1"]
-        EP[EmulatorService / WarmPool / snapshots]
+    subgraph mem [Part 1 in-memory]
+        EP[EmulatorService / snapshots / warm queue]
     end
 
-    subgraph db["SQLite async"]
+    subgraph db [SQLite]
         U[(users)]
         US[(user_sessions)]
         SH[(session_health_history)]
@@ -58,4 +75,4 @@ flowchart TB
     BG --> US
 ```
 
-For request-level flows inside a mission (parallel app chains, identity gate), see [ARCHITECTURE.md](ARCHITECTURE.md).
+Mission scheduling (parallel app chains, identity gate) is described in [ARCHITECTURE.md](ARCHITECTURE.md).

@@ -1,11 +1,13 @@
 # API reference
 
-Base URL examples:
+## Base URL
 
-- **Docker Compose** (this repo): `http://localhost:8082` (host maps `8082:8080`).
-- **Local uvicorn**: `http://localhost:8080` unless you pass another `--port`.
+| Environment | Example base URL |
+|-------------|------------------|
+| Docker Compose (this repo) | `http://localhost:8082` — host maps **`8082:8080`**. |
+| Local Uvicorn | `http://localhost:8080` (or your `--port`). |
 
-All JSON bodies use `Content-Type: application/json` where a body is shown.
+Use header **`Content-Type: application/json`** for request bodies where a body is required.
 
 ---
 
@@ -13,44 +15,56 @@ All JSON bodies use `Content-Type: application/json` where a body is shown.
 
 ### `GET /healthz`
 
-Liveness probe.
+**Purpose:** Liveness.
 
 **Response** `200 OK`
 
 ```json
-{
-  "status": "ok"
-}
+{ "status": "ok" }
 ```
 
 ---
 
-## Emulators (mock orchestration)
+## Emulators
 
-Tag: `emulators`
+**OpenAPI tag:** `emulators`
+
+Behavior depends on **`EMULATOR_BACKEND`**: **`mock`** (simulated) vs **`sdk`** (real emulator + `adb`).
+
+### `GET /emulators`
+
+**Purpose:** List emulators tracked by this process.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `running_only` | boolean | `false` | If `true`, only **`RUNNING`** emulators. |
+
+**Response** `200 OK` — JSON array of `EmulatorStatusResponse` (see status endpoint).
+
+---
 
 ### `POST /emulators`
 
-Provision an emulator, optionally restored from a snapshot (defaults to base snapshot when omitted).
+**Purpose:** Provision an emulator, optionally from a snapshot (defaults to base when omitted).
 
-**Request body** (optional; defaults to empty object)
+**Request body** (optional)
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `snapshot_id` | string \| null | Snapshot to restore from; omit or null for default base. |
+| `snapshot_id` | string \| null | Snapshot to restore; omit or `null` for default base. |
 
 **Response** `200 OK` — `ProvisionEmulatorResponse`
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Emulator id (e.g. `emu-…`). |
-| `state` | string | e.g. `RUNNING`. |
-| `restored_snapshot_id` | string \| null | Snapshot used for restore. |
-| `boot_seconds` | number | Simulated boot/restore time. |
+| Field | Type |
+|-------|------|
+| `id` | string (e.g. `emu-…`) |
+| `state` | string (e.g. `RUNNING`) |
+| `restored_snapshot_id` | string \| null |
+| `boot_seconds` | number |
 
-**Errors**
-
-- `400` — invalid snapshot or bad input (`detail` string).
+**Errors:** `400` — invalid snapshot or input (`detail` in body).
 
 ---
 
@@ -61,7 +75,7 @@ Provision an emulator, optionally restored from a snapshot (defaults to base sna
 | Field | Type |
 |-------|------|
 | `id` | string |
-| `state` | enum: `CREATING`, `STARTING`, `RUNNING`, `SNAPSHOTTING`, `STOPPING`, `STOPPED`, `FAILED`, `DESTROYED` |
+| `state` | `CREATING`, `STARTING`, `RUNNING`, … |
 | `current_snapshot_id` | string \| null |
 | `assigned` | boolean |
 | `pool_role` | string |
@@ -69,16 +83,15 @@ Provision an emulator, optionally restored from a snapshot (defaults to base sna
 | `health_ok` | boolean |
 | `consecutive_health_failures` | integer |
 | `message` | string \| null |
+| `adb_serial` | string \| null (SDK: e.g. `emulator-5554`) |
 
-**Errors**
-
-- `404` — emulator not found.
+**Errors:** `404` — emulator not found.
 
 ---
 
 ### `POST /emulators/{emulator_id}/snapshot`
 
-Create a layered snapshot from the running emulator.
+**Purpose:** Create a layered snapshot from a **running** emulator.
 
 **Request body** — `CreateSnapshotRequest`
 
@@ -95,86 +108,57 @@ Create a layered snapshot from the running emulator.
 | `layer` | string |
 | `parent_snapshot_id` | string \| null |
 
-**Errors**
-
-- `404` — emulator not found.
-- `409` — conflict (e.g. invalid state; `detail` explains).
+**Errors:** `404` — emulator not found. `409` / `400` — invalid state or input (`detail`).
 
 ---
 
 ### `DELETE /emulators/{emulator_id}`
 
-Tear down the emulator.
+**Purpose:** Tear down the emulator.
 
 **Response** `204 No Content`
 
-**Errors**
-
-- `404` — emulator not found.
+**Errors:** `404` — not found.
 
 ---
 
 ### `GET /internal/health-events`
 
-Debug: recent mock emulator health probe events.
+**Purpose:** Debug — recent emulator health probe events.
 
-**Query**
+**Query:** `limit` (default `50`).
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `limit` | `50` | Max events returned. |
-
-**Response** `200 OK`
-
-```json
-{
-  "events": [ { "...": "HealthEvent fields" } ]
-}
-```
+**Response** `200 OK` — JSON with an `events` array.
 
 ---
 
-## Sessions (SQLite)
+## Sessions
 
-Tag: `sessions` — routes are under prefix `/users`.
+**OpenAPI tag:** `sessions` — routes live under **`/users`**.
 
 ### `GET /users/{user_id}/sessions`
 
-List sessions for a user.
+**Purpose:** List all sessions for a user.
 
 **Response** `200 OK` — `SessionsListResponse`
 
-| Field | Type |
-|-------|------|
-| `user_id` | string |
-| `sessions` | array of `SessionEntry` |
-
-`SessionEntry` fields:
-
-| Field | Type |
-|-------|------|
-| `session_id` | integer |
-| `app_package` | string |
-| `snapshot_id` | string \| null |
-| `health` | string |
-| `last_verified_at` | ISO datetime \| null |
-| `last_access_at` | ISO datetime \| null |
-| `login_method` | string |
-| `tier` | string (`hot` \| `warm` \| `cold`) |
-| `re_auth_required` | boolean |
+- `user_id` (string)
+- `sessions` — array of `SessionEntry` (`session_id`, `app_package`, `snapshot_id`, `health`, timestamps, `login_method`, `tier`, `re_auth_required`)
 
 ---
 
 ### `POST /users/{user_id}/sessions/{app_package}/verify`
 
-Touch the session and run a mock health check; creates user and session if missing.
+**Purpose:** Touch the session and run the mock health check; creates **user** and **session** rows if missing.
+
+**Path:** `app_package` is the Android package (e.g. `com.example.app`).
 
 **Request body** (optional)
 
 | Field | Type |
 |-------|------|
 | `login_method` | `otp` \| `sso` \| `password` \| omitted |
-| `snapshot_id` | string \| null |
+| `snapshot_id` | string \| null — bind this Part 1 snapshot to the session |
 
 **Response** `200 OK` — `VerifySessionResponse`
 
@@ -190,107 +174,71 @@ Touch the session and run a mock health check; creates user and session if missi
 
 ### `GET /users/{user_id}/sessions/{app_package}/health-history`
 
-**Query**
+**Query:** `limit` (default `100`).
 
-| Parameter | Default |
-|-----------|---------|
-| `limit` | `100` |
+**Response** `200 OK` — `HealthHistoryResponse` (`user_id`, `app_package`, `events` chronological).
 
-**Response** `200 OK` — `HealthHistoryResponse`
-
-| Field | Type |
-|-------|------|
-| `user_id` | string |
-| `app_package` | string |
-| `events` | array of `{ checked_at, observed, detail }` (chronological order in response) |
-
-**Errors**
-
-- `404` — session not found for that user/app.
+**Errors:** `404` — no session for that user/app.
 
 ---
 
 ## Missions
 
-Tag: `missions`
+**OpenAPI tag:** `missions`
 
 ### `POST /missions`
-
-Create a mission and enqueue background execution.
 
 **Request body** — `CreateMissionRequest`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `user_id` | string | Required, non-empty. |
-| `targets` | array | At least one `{ app_package, goal }`. |
-| `webhook_url` | string \| null | Optional URL for identity-gate notifications. |
+| `user_id` | string | Required. |
+| `targets` | array | At least one `{ "app_package", "goal" }`. |
+| `webhook_url` | string \| null | Optional; used for identity-gate notifications. |
 
-Each target:
-
-| Field | Type |
-|-------|------|
-| `app_package` | string |
-| `goal` | string |
-
-**Response** `200 OK` — `CreateMissionResponse`
-
-Includes `mission_id`, `user_id`, `state`, `tasks` (each task has `task_id` UUID string, `sequence`, `app_package`, `goal`, `state`, optional `emulator_id`, `error_message`, `identity_gate_notified_at`, timestamps), `created_at`, `updated_at`.
+**Response** `200 OK` — `CreateMissionResponse` (mission id, state, tasks with `task_id`, etc.).
 
 ---
 
 ### `GET /missions/{mission_id}`
 
-**Response** `200 OK` — `MissionDetailResponse`
+**Response** `200 OK` — mission + tasks + `webhook_url`, `error_detail`.
 
-Same task shape as create, plus mission-level `webhook_url`, `error_detail`.
-
-**Errors**
-
-- `404` — mission not found.
-
----
-
-### Identity gate webhook (outbound)
-
-When a task enters `identity_gate` and the mission has a `webhook_url`, the service **POST**s JSON:
-
-```json
-{
-  "event": "identity_gate",
-  "mission_id": "<mission id>",
-  "task_id": "<task id>",
-  "user_id": "<user id>",
-  "app_package": "<app package>"
-}
-```
-
-Delivery is best-effort; failures are logged. The task still waits for approve or timeout even if the webhook fails.
+**Errors:** `404` — mission not found.
 
 ---
 
 ### `POST /missions/{mission_id}/tasks/{task_id}/approve`
 
-Resume a task blocked in **identity_gate** (idempotent if not in that state).
+**Purpose:** Resume a task blocked in **identity_gate** (no-op if not in that state).
 
-**Response** `200 OK` — `ApproveMissionTaskResponse`
+**Response** `200 OK` — `ApproveMissionTaskResponse` (`mission_id`, `task_id`, `state`, `message`).
 
-| Field | Type |
-|-------|------|
-| `mission_id` | string |
-| `task_id` | string |
-| `state` | string (current task state) |
-| `message` | string — e.g. `resume signaled` or `not in identity_gate; no-op` |
+**Errors:** `404` — task not found.
 
-**Errors**
+---
 
-- `404` — task not found.
+### Identity gate webhook (outbound)
+
+When a task enters `identity_gate` and the mission has `webhook_url`, the service **POST**s JSON like:
+
+```json
+{
+  "event": "identity_gate",
+  "mission_id": "<id>",
+  "task_id": "<id>",
+  "user_id": "<id>",
+  "app_package": "<package>"
+}
+```
+
+Delivery is best-effort; failures are logged.
 
 ---
 
 ## OpenAPI
 
-The running app exposes interactive schemas at:
-
-- Swagger UI: `/docs`
-- OpenAPI JSON: `/openapi.json`
+| URL | Description |
+|-----|-------------|
+| `/docs` | Swagger UI |
+| `/openapi.json` | OpenAPI schema |

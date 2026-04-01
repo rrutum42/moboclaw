@@ -4,64 +4,65 @@ This document describes how the Moboclaw service is structured: entrypoint, laye
 
 ## Process model
 
-- **Runtime**: One **FastAPI** application (`app.main:app`) with an **async lifespan** that initializes the database and starts background workers.
-- **Database**: **SQLAlchemy 2.x** async with **SQLite** (`aiosqlite`) for `users`, `user_sessions`, `session_health_history`, `missions`, and `mission_tasks`.
-- **Part 1 state**: Mock emulators, snapshots, and health history for emulators live **in memory** inside `EmulatorService` (not in SQLite).
+| Concern | Implementation |
+|---------|----------------|
+| **HTTP** | FastAPI (`app.main:app`), async lifespan: DB init → background workers. |
+| **SQLite** | SQLAlchemy 2 async + `aiosqlite`: users, sessions, missions, tasks, health history. |
+| **Part 1** | Emulators + snapshot **catalog** + warm queue: **in-memory** (`EmulatorService` / `InMemoryStore`). Not replicated across processes. |
 
-## Layered modules (MVC-style)
+## Code layout (MVC-style)
 
-
-| Layer                                        | Role                                                                                                              |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **Controllers** (`app/controllers/`)         | HTTP routes only: `system`, `emulators`, `users_sessions`, `missions`.                                            |
-| **Services** (`app/services/`)               | Business logic: emulator orchestration, warm pool, session CRUD + verify, mission pipeline, simulation, webhooks. |
-| **DB** (`app/db/`)                           | Engine, session dependency, ORM models, init/seed.                                                                |
-| **Schemas** (`app/schemas/`)                 | Pydantic request/response models for sessions and missions.                                                       |
-| **Models** (`app/models.py`, `app/store.py`) | Part 1 Pydantic types and in-memory structures.                                                                   |
-
+| Layer | Location | Role |
+|-------|----------|------|
+| Controllers | `app/controllers/` | Routes: `system`, `emulators`, `users_sessions`, `missions`. |
+| Services | `app/services/` | Orchestration, warm pool, sessions, missions, SDK adapters. |
+| DB | `app/db/` | Engine, deps, ORM, `init_db`, seed. |
+| Schemas | `app/schemas/` | Pydantic API models (sessions, missions). |
+| Part 1 models | `app/models.py`, `app/store.py` | Pydantic + in-memory emulator/snapshot state. |
 
 ## Background workers
 
-Started in `app.background.start_background_workers()`:
+Started from `app.background.start_background_workers()`:
 
-1. **Emulator subsystem** — `emulator_service.start_background_tasks()` drives warm pool fill, health monitoring, and related async loops (see `health_monitor`, `warm_pool`, etc.).
-2. **Session health worker** — `session_health_run_loop` polls on `SESSION_WORKER_TICK_SECONDS` and schedules tier-based health checks for hot/warm sessions.
+1. **Emulator subsystem** — `emulator_service.start_background_tasks()`: warm pool fill, emulator health loop (`health_monitor`, `warm_pool`, …).
+2. **Session health worker** — `session_health_run_loop`: polls every `SESSION_WORKER_TICK_SECONDS`, tier-based checks for hot/warm sessions.
 
-On shutdown, the session worker task is cancelled and emulator background tasks are stopped.
+Shutdown: cancel session worker task; stop emulator background tasks.
 
-## Mission execution pipeline
+## Mission pipeline (summary)
 
-1. **Create** — `POST /missions` persists `Mission` + `MissionTask` rows and schedules `mission_service.safe_run_mission(mission_id)` via FastAPI `BackgroundTasks`.
-2. **Group by app** — Targets are grouped by `app_package`. Each group runs as an **asyncio** task; groups run **concurrently** (`asyncio.gather`). Within a group, tasks run **in sequence** (ordered by `targets` list).
-3. **Session gate** — For each task, the service loads `user_sessions` for `(user_id, app_package)`. Missing row or `health == expired` → task **failed** (no emulator).
-4. **Emulator** — `EmulatorService` provisions a mock emulator (snapshot from session or Part 1 base), records `emulator_id` on the task, simulates execution (`MISSION_EXECUTE_SIM_SECONDS`).
-5. **Identity gate** — With probability `MISSION_IDENTITY_GATE_PROBABILITY`, after simulated execution the task enters `identity_gate`. If `webhook_url` is set, an HTTP POST is sent (httpx, configurable timeouts). The task waits on an `asyncio.Event` until `POST .../approve` or until `MISSION_IDENTITY_GATE_TIMEOUT_SECONDS` elapses (failure).
-6. **Teardown** — Emulator is destroyed so instances are not leaked.
-7. **Mission state** — Derived from task states: any task `failed` → mission `failed`; all `done` → mission `done`; all `queued` → `queued`; else `running`.
+1. **Create** — `POST /missions` persists mission + tasks; schedules `mission_service.safe_run_mission` via `BackgroundTasks`.
+2. **Group by app** — Targets grouped by `app_package`. Each group = one asyncio task; groups run **concurrently** (`asyncio.gather`). Inside a group, tasks run **in order** of the `targets` list.
+3. **Session gate** — Load `user_sessions` for `(user_id, app_package)`. Missing row or `health == expired` → task **failed** (no emulator).
+4. **Emulator** — `EmulatorService.provision` using session `snapshot_id` or Part 1 base; task stores `emulator_id`; simulated work (`MISSION_EXECUTE_SIM_SECONDS`).
+5. **Identity gate** — With probability `MISSION_IDENTITY_GATE_PROBABILITY`, task pauses in `identity_gate`; optional webhook POST; wait for `POST .../approve` or timeout.
+6. **Teardown** — Destroy emulator.
+7. **Mission state** — Derived from task states (any failed → mission failed; all done → done; etc.).
 
-## Identity gate coordination
+Details: parallel chains and gate behavior in code (`app/services/mission_service.py`).
 
-Approve uses per `(mission_id, task_id)` in-memory `asyncio.Event` instances. This is correct for a **single process**. Multiple worker processes would need Redis, DB polling, or message bus for gate signaling.
+## Identity gate (single process)
+
+Approve uses in-memory `asyncio.Event` per `(mission_id, task_id)`. **Single replica only**; multiple workers would need Redis/DB/messages for coordination.
 
 ## Configuration
 
-Environment-driven settings are grouped in:
+| Module | Prefix | Contents |
+|--------|--------|----------|
+| `app/config.py` | `EMULATOR_*` | Backend, AVD, warm pool, health, SDK paths. |
+| `app/session_config.py` | `SESSION_*` | DB URL, tiers, worker tick, mock probability. |
+| `app/mission_config.py` | `MISSION_*` | Gate probability, timeouts, webhook timeouts, sim delay. |
 
-- `app/config.py` — `EMULATOR_`* (warm pool, boot times, health).
-- `app/session_config.py` — `SESSION_*` (DB URL, tiers, worker tick, mock probability).
-- `app/mission_config.py` — `MISSION_*` (gate probability, timeouts, webhook timeouts, simulation delay).
-
-See the repository root `README.md` for variable tables.
+Full tables: root **`README.md`**.
 
 ## Extension points
 
-- **Real emulators**: Implement provisioning/snapshot/destroy behind `EmulatorService` and keep route contracts stable.
-- **Real session health**: Replace mock roll in `session_service` with OCR/VLM or device APIs; keep `re_auth_required` semantics if missions depend on it.
-- **Durable mission queue**: Replace `BackgroundTasks` with Celery/RQ/SQS and an idempotent worker for crash recovery and horizontal scale.
+- **Real device farm** — Keep route contracts; swap provisioning/snapshot/teardown behind `EmulatorService`.
+- **Real session health** — Replace mock roll in `session_service` with device/vision signals; keep `re_auth_required` if missions depend on it.
+- **Durable mission queue** — Replace `BackgroundTasks` with a queue worker for crash recovery and horizontal scale.
 
-## Related documents
+## Related docs
 
-- [DATA_MODEL.md](DATA_MODEL.md) — relational schema summary.
+- [DATA_MODEL.md](DATA_MODEL.md) — SQLite tables.
 - [API.md](API.md) — HTTP reference.
-- [ASSUMPTIONS_AND_LIMITATIONS.md](ASSUMPTIONS_AND_LIMITATIONS.md) — scope and limits.
-
+- [ASSUMPTIONS_AND_LIMITATIONS.md](ASSUMPTIONS_AND_LIMITATIONS.md) — Scope and limits.

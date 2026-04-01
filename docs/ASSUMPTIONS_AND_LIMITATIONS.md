@@ -1,36 +1,39 @@
-# Assumptions and known limitations
+# Assumptions and limitations
 
 ## Assumptions
 
-### Emulator layer (Part 1)
+### Part 1 (emulators)
 
-- **Mock backend** — Emulators are simulated in process (timing, health flakiness, snapshot chain). Production would replace `EmulatorService` / warm pool with real devices or VMs while keeping the same REST surface.
-- **Single replica** — In-memory emulator state is not shared across processes; horizontal scaling would require an external orchestrator and shared snapshot store.
-- **Warm pool** — A fixed number of idle “warm” instances is filled asynchronously; until then, provisioning may cold-boot (still within simulated SLA targets in README).
+- **Mock backend** — Simulated timings and health; no Android SDK or AVD required.
+- **SDK backend** — We assume a **golden (base) AVD already exists** on the machine: the name must match **`EMULATOR_AVD_NAME`** (default `Pixel_6_API_34`). Moboclaw does **not** create or download system images; you install the SDK, create an AVD (Android Studio or `avdmanager`), then run the API. Session clones copy that AVD tree from `~/.android/avd/…`.
+- **Single process** — In-memory emulator state is not shared; scale-out needs an external orchestrator + shared snapshot storage if you keep the same API shape.
+- **Warm pool** — A target number of idle instances is filled in the background; until filled, provisioning may cold-boot.
 
-### Sessions (Part 2)
+### Part 2 (sessions)
 
-- **SQLite** — Default deployment uses file-backed SQLite with `aiosqlite`. Suitable for demo and single-node workloads; high concurrency or HA would move to a client/server RDBMS.
-- **Mock vision health** — `verify` and scheduled checks use probabilistic logged-in vs expired outcomes (`SESSION_MOCK_LOGGED_IN_PROBABILITY`), not real screen analysis.
-- **Tiering** — Derived from `last_access_at` and configured windows; cold sessions are not auto-polled by the worker (manual `verify` or mission-driven access applies).
+- **SQLite** — File-backed DB is fine for demo and single-node use; production HA would use a client/server database.
+- **Mock health** — `verify` and scheduled checks use **`SESSION_MOCK_LOGGED_IN_PROBABILITY`** (random logged-in vs expired), not real screen analysis.
+- **Tiering** — From `last_access_at` and configured windows; **cold** sessions are not auto-polled (use **verify** or mission access).
 
-### Missions (Part 3)
+### Part 3 (missions)
 
-- **Session prerequisite** — Tasks require a `user_sessions` row for `(user_id, app_package)` with health not `expired`; otherwise the task fails without provisioning.
-- **Emulator lifecycle** — Each task allocates a mock emulator and destroys it after work; no long-lived pooled mission emulators in this prototype.
-- **Parallelism model** — Different `app_package` values run in parallel; multiple tasks for the **same** app run **sequentially** in target list order.
-- **Identity gate** — Optional random gate with webhook + HTTP approve; timeouts and webhook failures are handled as documented in architecture (best-effort webhook, timeout → failed task).
+- **Session required** — Tasks need a `user_sessions` row for `(user_id, app_package)` with health **not** `expired`.
+- **Per-task emulator** — Each task provisions then destroys an emulator (prototype); no long-lived mission pool.
+- **Parallelism** — Different `app_package` values run in parallel; same app → sequential in list order.
+- **Identity gate** — Random gate + optional webhook + HTTP approve; timeouts and webhook failures behave as documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
 
 ## Known limitations
 
 | Area | Limitation |
 |------|------------|
-| **Persistence** | Emulator and snapshot metadata for Part 1 live in memory only; restart loses mock emulators (DB tables hold sessions/missions only). |
-| **Mission runner** | Background mission execution uses in-process asyncio; process crash can leave missions mid-flight (no distributed queue). |
-| **Identity gate** | Coordination uses in-memory `asyncio.Event` map (`_gate_events`); multiple API replicas would not share gate state without external sync. |
-| **Webhooks** | Outbound calls are best-effort; failures are logged, not retried with backoff in this codebase. |
-| **Authn/z** | No API authentication; all routes are open if the port is reachable. |
-| **Rate limits** | No rate limiting or quota enforcement on endpoints. |
-| **Idempotency** | Mission create is not idempotent; duplicate POSTs create duplicate missions. |
+| **Part 1 durability** | Snapshot **metadata** for provisioning lives in **memory**; API restart drops the in-memory catalog until base seed / new captures. |
+| **Mission runner** | In-process `asyncio`; crash can leave missions mid-flight (no distributed queue). |
+| **Identity gate** | In-memory events; not shared across replicas. |
+| **Webhooks** | Best-effort; no retry with backoff in code. |
+| **Security** | No authentication on `/emulators`, `/users`, `/missions` if the port is exposed. |
+| **Rate limits** | None. |
+| **Idempotency** | Duplicate `POST /missions` creates duplicate missions. |
 
-These limits are acceptable for the take-home / prototype scope and should be revisited before production use.
+Acceptable for a prototype; revisit before production.

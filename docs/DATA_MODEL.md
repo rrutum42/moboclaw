@@ -1,70 +1,77 @@
 # Data model (SQLite)
 
-ORM definitions live in `app/db/orm.py`. The API uses async SQLAlchemy with SQLite (`aiosqlite`).
+ORM: `app/db/orm.py`. Driver: **async SQLAlchemy** + **SQLite** (`aiosqlite`).
 
-## Entity relationship (conceptual)
+## Relationships (conceptual)
 
-- **User** `users.id` (string PK) has many **UserSession** and many **Mission**.
-- **UserSession** `user_sessions` — one row per `(user_id, app_package)` (unique constraint). Integer `id` is exposed as `session_id` in APIs.
-- **SessionHealthEvent** `session_health_history` — many rows per session (check history).
-- **Mission** `missions.id` (string PK, UUID in practice) belongs to one user.
-- **MissionTask** `mission_tasks` — many per mission; `task_id` is a unique string (UUID); `sequence` orders tasks within the mission.
+```text
+User (users)
+  ├── UserSession (many)     — unique (user_id, app_package)
+  │       └── SessionHealthEvent (many)
+  └── Mission (many)
+          └── MissionTask (many)
+```
 
-## Tables summary
+- **`users.id`**: string primary key (you pass it in URLs; **`verify`** can create the row if missing).
+- **`user_sessions`**: integer **`id`** is returned as **`session_id`** in JSON.
+- **`snapshot_id`** on a session: optional string referencing Part 1 snapshot ids (same strings as in `InMemoryStore.snapshots`).
+
+Part 1 **emulator runtime** and the **snapshot catalog** are **not** in these tables; they live in memory. Restarting the API clears in-memory snapshots unless the base snapshot is seeded again on startup.
+
+---
+
+## Tables
 
 ### `users`
 
-| Column | Notes |
-|--------|--------|
-| `id` | String PK (user identifier from API). |
+| Column | Description |
+|--------|-------------|
+| `id` | String PK. |
 | `created_at` | Timezone-aware datetime. |
 
 ### `user_sessions`
 
-| Column | Notes |
-|--------|--------|
-| `id` | Autoincrement PK (`session_id` in responses). |
+| Column | Description |
+|--------|-------------|
+| `id` | Autoincrement PK (exposed as `session_id`). |
 | `user_id` | FK → `users.id` (CASCADE delete). |
-| `app_package` | With `user_id`, unique (`uq_user_app`). |
-| `snapshot_id` | Optional string ref to Part 1 snapshot. |
-| `health` | `alive` \| `expired` \| `unknown` (stored as string). |
+| `app_package` | Android package name; unique with `user_id`. |
+| `snapshot_id` | Optional; Part 1 snapshot id for provisioning. |
+| `health` | `alive` / `expired` / `unknown`. |
 | `last_verified_at`, `last_access_at` | Nullable datetimes. |
 | `login_method` | e.g. `otp`, `sso`, `password`. |
-| `tier` | `hot`, `warm`, `cold` (derived/maintained by session logic). |
+| `tier` | `hot` / `warm` / `cold`. |
 
 ### `session_health_history`
 
-| Column | Notes |
-|--------|--------|
+| Column | Description |
+|--------|-------------|
 | `session_id` | FK → `user_sessions.id`. |
 | `checked_at` | When the check ran. |
-| `observed` | Outcome label from mock/real check. |
+| `observed` | Label from mock (or future real) check. |
 | `detail` | Optional text. |
 
 ### `missions`
 
-| Column | Notes |
-|--------|--------|
-| `id` | String PK. |
+| Column | Description |
+|--------|-------------|
+| `id` | String PK (UUID in practice). |
 | `user_id` | FK → `users.id`. |
-| `state` | `queued`, `running`, `done`, `failed`. |
-| `webhook_url` | Optional; used for identity gate POST. |
+| `state` | `queued` / `running` / `done` / `failed`. |
+| `webhook_url` | Optional; identity-gate POST target. |
 | `error_detail` | Optional mission-level error. |
 | `created_at`, `updated_at` | Timestamps. |
 
 ### `mission_tasks`
 
-| Column | Notes |
-|--------|--------|
-| `id` | Internal autoincrement PK. |
+| Column | Description |
+|--------|-------------|
 | `mission_id` | FK → `missions.id`. |
 | `task_id` | Unique string (client-facing id). |
-| `sequence` | Order within mission; unique per `mission_id`. |
+| `sequence` | Order within mission. |
 | `app_package`, `goal` | Task targeting. |
-| `state` | `queued`, `allocating`, `executing`, `identity_gate`, `completing`, `done`, `failed`. |
-| `emulator_id` | Mock emulator id while running. |
-| `identity_gate_notified_at` | When webhook was sent (if applicable). |
-| `error_message` | Task failure reason. |
+| `state` | Includes `identity_gate` when paused for approve. |
+| `emulator_id` | Part 1 emulator id while running. |
+| `identity_gate_notified_at` | When webhook was sent (if any). |
+| `error_message` | Failure reason. |
 | `created_at`, `updated_at` | Timestamps. |
-
-Part 1 emulator and snapshot metadata are **not** stored in these tables; they exist only in memory unless you extend the schema.
