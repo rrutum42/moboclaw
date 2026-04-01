@@ -20,7 +20,11 @@ from app.services.emulator_backend import EmulatorBackend, create_emulator_backe
 from app.services.emulator_lifecycle import destroy_emulator as teardown_emulator
 from app.services.health_monitor import HealthMonitor
 from app.services.ids import new_emulator_id
-from app.services.qcow2_metadata import QCOW2_USERDATA_PATH
+from app.services.qcow2_metadata import (
+    AVD_CLONE_PATH,
+    SESSION_ANDROID_AVD_HOME,
+    SESSION_AVD_NAME,
+)
 from app.services.snapshot_capture import capture_snapshot
 from app.services.snapshots import BASE_SNAPSHOT_ID, seed_base_snapshot
 from app.services.warm_pool import WarmPool
@@ -110,14 +114,16 @@ class EmulatorService:
         snap = await self.store.get_snapshot(target)
         if not snap:
             raise ValueError(f"unknown snapshot_id={target}")
-        if (
-            self.settings.backend == "sdk"
-            and target != BASE_SNAPSHOT_ID
-            and not snap.metadata.get(QCOW2_USERDATA_PATH)
-        ):
-            raise ValueError(
-                f"SDK backend: snapshot must include metadata.{QCOW2_USERDATA_PATH} (qcow2 branch image).",
-            )
+        if self.settings.backend == "sdk" and target != BASE_SNAPSHOT_ID:
+            if not (
+                snap.metadata.get(AVD_CLONE_PATH)
+                and snap.metadata.get(SESSION_AVD_NAME)
+                and snap.metadata.get(SESSION_ANDROID_AVD_HOME)
+            ):
+                raise ValueError(
+                    f"SDK backend: snapshot must include metadata.{AVD_CLONE_PATH}, "
+                    f".{SESSION_AVD_NAME}, and .{SESSION_ANDROID_AVD_HOME} (AVD directory clone).",
+                )
 
         async def _do() -> ProvisionEmulatorResponse:
             log.info("provision step: target=%s", target)

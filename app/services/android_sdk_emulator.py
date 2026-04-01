@@ -181,6 +181,15 @@ async def adb_emu_kill(adb: Path, serial: str) -> None:
     await _run_text(str(adb), "-s", serial, "emu", "kill", timeout=60.0)
 
 
+async def adb_shell_sync(adb: Path, serial: str) -> bool:
+    """Flush filesystem buffers before offline userdata capture (best-effort)."""
+    code, _out, err = await _run_text(str(adb), "-s", serial, "shell", "sync", timeout=120.0)
+    if code != 0:
+        log.warning("adb shell sync failed serial=%s rc=%s: %s", serial, code, err)
+        return False
+    return True
+
+
 async def start_emulator_process(
     settings: Settings,
     *,
@@ -189,7 +198,7 @@ async def start_emulator_process(
     android_avd_home: Path | None = None,
     avd_name: str | None = None,
 ) -> asyncio.subprocess.Process:
-    """Start emulator with v1 qcow2 session AVD (``-no-snapshot-load``; no adb/AVD snapshots)."""
+    """Start emulator with a cloned session AVD (no quick-boot snapshot load/save)."""
     sdk = settings.resolved_android_sdk_root()
     emu = sdk_emulator_path(settings)
     import os
@@ -212,6 +221,8 @@ async def start_emulator_process(
     if read_only_avd:
         cmd.append("-read-only")
     cmd.append("-no-snapshot-load")
+    # Avoid "unable to lock snapshot save on exit!" crash dialog when teardown races qcow2/session AVD.
+    cmd.append("-no-snapshot-save")
     cmd.extend(emulator_cli_extra_args(settings))
 
     proc = await asyncio.create_subprocess_exec(
@@ -264,10 +275,28 @@ async def kill_emulator(
     if proc is None:
         return
     try:
-        proc.terminate()
+        # After `adb emu kill`, the emulator should exit on its own. Sending SIGTERM to the
+        # wrapper immediately races QEMU teardown and often triggers "qemu-system-* quit
+        # unexpectedly" on macOS. Prefer waiting for a clean exit first.
+        if serial:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=60.0)
+                return
+            except TimeoutError:
+                log.warning(
+                    "emulator pid=%s did not exit within 60s after adb emu kill; sending SIGTERM",
+                    proc.pid,
+                )
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
         await asyncio.wait_for(proc.wait(), timeout=15.0)
     except TimeoutError:
-        proc.kill()
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
         try:
             await proc.wait()
         except Exception:

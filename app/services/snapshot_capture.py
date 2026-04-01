@@ -2,28 +2,42 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 
 from app.config import Settings
 from app.models import CreateSnapshotRequest, CreateSnapshotResponse, EmulatorState, SnapshotRecord
+from app.services.android_sdk_emulator import adb_shell_sync, sdk_adb_path
 from app.services.emulator_backend import EmulatorBackend
 from app.services.emulator_lifecycle import destroy_emulator as teardown_emulator
 from app.services.ids import new_snapshot_id
 from app.services.qcow2_avd import (
-    SESSION_USERDATA_QCOW2_NAME,
-    branch_image_path,
+    branch_snapshot_dir,
     destroy_session_avd_tree,
-    qemu_img_convert_flat_qcow2,
+    flatten_userdata_qcow2_overlay_into_raw,
 )
 from app.services.qcow2_metadata import (
-    QCOW2_FORMAT,
-    QCOW2_FORMAT_FLAT,
-    QCOW2_PARENT_SNAPSHOT_ID,
-    QCOW2_USERDATA_PATH,
+    AVD_CLONE_PATH,
+    AVD_PARENT_SNAPSHOT_ID,
+    SESSION_ANDROID_AVD_HOME,
+    SESSION_AVD_NAME,
 )
 from app.store import InMemoryStore
 
 log = logging.getLogger(__name__)
+
+
+def _copy_session_tree_to_branch(src: Path, dst: Path) -> None:
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst, symlinks=True)
+
+
+def _prepare_session_tree_for_branch_snapshot(home_path: Path, avd_name: str, settings: Settings) -> None:
+    avd_dir = home_path / f"{avd_name}.avd"
+    if avd_dir.is_dir():
+        flatten_userdata_qcow2_overlay_into_raw(avd_dir, settings)
 
 
 async def capture_snapshot(
@@ -71,30 +85,35 @@ async def capture_snapshot(
             parent_snapshot_id=parent,
         )
 
-    # SDK v1: offline qemu-img flatten to a qcow2 branch (no adb snapshot). Ends this emulator session.
     home = rec.qcow2_android_avd_home
     name = rec.qcow2_avd_name
     if not home or not name:
         async with rec.lock:
             rec.state = EmulatorState.RUNNING
-        raise ValueError("SDK backend: emulator has no qcow2 session AVD; cannot capture branch")
+        raise ValueError("SDK backend: emulator has no session AVD; cannot capture snapshot")
 
-    overlay = Path(home) / f"{name}.avd" / SESSION_USERDATA_QCOW2_NAME
-    dest = branch_image_path(settings, sid)
+    home_path = Path(home)
+    dest = branch_snapshot_dir(settings, sid)
 
     try:
+        if rec.adb_serial:
+            synced = await adb_shell_sync(sdk_adb_path(settings), rec.adb_serial)
+            if synced:
+                await asyncio.sleep(0.4)
         await backend.teardown(emulator_id, remove_session_files=False)
         log.info(
-            "snapshot qcow2 convert start emulator_id=%s overlay=%s dest=%s",
+            "snapshot avd clone capture emulator_id=%s src=%s dest=%s",
             emulator_id,
-            overlay,
+            home_path,
             dest,
         )
-        await qemu_img_convert_flat_qcow2(settings, source_chain=overlay, dest=dest)
+        await asyncio.to_thread(_prepare_session_tree_for_branch_snapshot, home_path, name, settings)
+        await asyncio.to_thread(_copy_session_tree_to_branch, home_path, dest)
         meta = {
-            QCOW2_USERDATA_PATH: str(dest.resolve()),
-            QCOW2_PARENT_SNAPSHOT_ID: parent,
-            QCOW2_FORMAT: QCOW2_FORMAT_FLAT,
+            AVD_CLONE_PATH: str(dest.resolve()),
+            SESSION_AVD_NAME: name,
+            SESSION_ANDROID_AVD_HOME: str(home_path.resolve()),
+            AVD_PARENT_SNAPSHOT_ID: parent,
         }
         snap = SnapshotRecord(
             id=sid,
@@ -106,7 +125,7 @@ async def capture_snapshot(
         await store.add_snapshot(snap)
     finally:
         destroy_session_avd_tree(settings, emulator_id)
-        await teardown_emulator(store, emulator_id, "snapshot_qcow2", quick=True)
+        await teardown_emulator(store, emulator_id, "snapshot_avd_clone", quick=True)
 
     log.info(
         "snapshot captured id=%s emulator=%s layer=%s parent=%s",

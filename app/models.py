@@ -70,7 +70,7 @@ class SnapshotRecord(BaseModel):
     parent_snapshot_id: str | None
     label: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
-    # v1 qcow2: `qcow2_userdata_path` (flat .qcow2), `qcow2_parent_snapshot_id`, `qcow2_format`.
+    # SDK: `avd_clone_path`, `session_avd_name`, `session_android_avd_home`, `avd_parent_snapshot_id`.
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

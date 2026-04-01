@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from app.config import Settings
+from app.models import SnapshotRecord
 from app.services.android_sdk_emulator import (
     adb_health_ok,
     adb_wait_boot_completed,
@@ -22,10 +23,14 @@ from app.services.android_sdk_emulator import (
 )
 from app.services.qcow2_avd import (
     destroy_session_avd_tree,
-    golden_userdata_path,
-    prepare_session_avd_with_overlay,
+    prepare_session_avd_from_branch,
+    prepare_session_avd_from_golden,
 )
-from app.services.qcow2_metadata import QCOW2_USERDATA_PATH
+from app.services.qcow2_metadata import (
+    AVD_CLONE_PATH,
+    SESSION_ANDROID_AVD_HOME,
+    SESSION_AVD_NAME,
+)
 from app.services.simulation import mock_health_probe, simulate_boot_seconds
 from app.services.snapshots import BASE_SNAPSHOT_ID
 from app.store import InMemoryStore
@@ -104,27 +109,23 @@ class SdkEmulatorBackend(EmulatorBackend):
         self._store = store
         self._next_port = settings.emulator_port_start
         self._runtime: dict[str, _SdkRuntime] = {}
-        # Serialize qemu-img overlay creation to avoid races / partial files when warm_pool_size > 1.
-        self._overlay_lock = asyncio.Lock()
+        # Serialize session AVD directory materialization when warm_pool_size > 1.
+        self._session_avd_lock = asyncio.Lock()
 
     def _take_next_console_port(self) -> int:
         p = self._next_port
         self._next_port += 2
         return p
 
-    def _userdata_backing_for_snapshot(self, snapshot_id: str) -> Path:
-        if snapshot_id == BASE_SNAPSHOT_ID:
-            return golden_userdata_path(self._settings)
-        raise AssertionError("expected snapshot record for non-base")
-
     async def _start_cold(
         self,
         emulator_id: str,
         *,
-        userdata_backing: Path,
         read_only_avd: bool,
+        snapshot_id: str,
+        snap: SnapshotRecord | None,
     ) -> tuple[float, str]:
-        """Start emulator with per-session qcow2 userdata overlay; register runtime and adb_serial."""
+        """Start emulator with a cloned session AVD tree; register runtime and adb_serial."""
         adb = sdk_adb_path(self._settings)
         console_port = self._take_next_console_port()
         serial = _serial_for_console_port(console_port)
@@ -137,23 +138,43 @@ class SdkEmulatorBackend(EmulatorBackend):
         android_avd_home: Path | None = None
         avd_name: str | None = None
         try:
-            async with self._overlay_lock:
-                android_avd_home, avd_name = await prepare_session_avd_with_overlay(
-                    self._settings,
-                    emulator_id=emulator_id,
-                    userdata_backing=userdata_backing,
-                )
+            async with self._session_avd_lock:
+                if snapshot_id == BASE_SNAPSHOT_ID:
+                    android_avd_home, avd_name = await prepare_session_avd_from_golden(
+                        self._settings,
+                        emulator_id,
+                    )
+                else:
+                    assert snap is not None
+                    clone = snap.metadata.get(AVD_CLONE_PATH)
+                    sname = snap.metadata.get(SESSION_AVD_NAME)
+                    shome = snap.metadata.get(SESSION_ANDROID_AVD_HOME)
+                    if not clone or not sname or not shome:
+                        raise ValueError(
+                            f"SDK backend: snapshot must include metadata.{AVD_CLONE_PATH}, "
+                            f".{SESSION_AVD_NAME}, and .{SESSION_ANDROID_AVD_HOME}",
+                        )
+                    bdir = Path(clone)
+                    if not bdir.is_dir():
+                        raise ValueError(f"avd_clone_path not found or not a directory: {bdir}")
+                    android_avd_home, avd_name = await prepare_session_avd_from_branch(
+                        self._settings,
+                        emulator_id,
+                        bdir,
+                        source_avd_name=str(sname),
+                        source_android_avd_home=Path(shome),
+                    )
             async with rec.lock:
                 rec.qcow2_android_avd_home = str(android_avd_home)
                 rec.qcow2_avd_name = avd_name
 
             log.info(
-                "sdk emulator start id=%s avd=%s read_only=%s port=%s backing=%s",
+                "sdk emulator start id=%s avd=%s read_only=%s port=%s snapshot_id=%s",
                 emulator_id,
                 avd_name,
                 read_only_avd,
                 console_port,
-                userdata_backing,
+                snapshot_id,
             )
             proc = await start_emulator_process(
                 self._settings,
@@ -197,11 +218,11 @@ class SdkEmulatorBackend(EmulatorBackend):
         return elapsed, serial
 
     async def boot_warm(self, emulator_id: str) -> float:
-        backing = golden_userdata_path(self._settings)
         elapsed, _ = await self._start_cold(
             emulator_id,
-            userdata_backing=backing,
             read_only_avd=self._settings.warm_boot_read_only,
+            snapshot_id=BASE_SNAPSHOT_ID,
+            snap=None,
         )
         return elapsed
 
@@ -226,22 +247,11 @@ class SdkEmulatorBackend(EmulatorBackend):
         if not snap:
             raise ValueError(f"unknown snapshot_id={snapshot_id}")
 
-        if snapshot_id == BASE_SNAPSHOT_ID:
-            backing = golden_userdata_path(self._settings)
-        else:
-            p = snap.metadata.get(QCOW2_USERDATA_PATH)
-            if not p:
-                raise ValueError(
-                    f"SDK backend: snapshot must include metadata.{QCOW2_USERDATA_PATH} (flat qcow2 branch).",
-                )
-            backing = Path(p)
-            if not backing.is_file():
-                raise ValueError(f"qcow2_userdata_path not found: {backing}")
-
         elapsed, _ = await self._start_cold(
             emulator_id,
-            userdata_backing=backing,
             read_only_avd=False,
+            snapshot_id=snapshot_id,
+            snap=snap if snapshot_id != BASE_SNAPSHOT_ID else None,
         )
         return elapsed
 

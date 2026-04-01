@@ -25,25 +25,30 @@ class WarmPool:
         self._settings = settings
         self._replenish_lock = replenish_lock
         self._backend = backend
+        # Serialize ensure_full so the replenish loop cannot start a second boot_warm while the
+        # first is still running (concurrent Android Emulator boots overload host adb / GPU).
+        self._ensure_full_lock = asyncio.Lock()
 
     async def warm_idle_count(self) -> int:
         return await self._store.count_warm_idle_running()
 
     async def ensure_full(self) -> None:
-        """Fill the warm pool. Lock is held only for count checks — not during boot (slow).
+        """Fill the warm pool.
 
-        Long boots used to run under the same lock as snapshot provisioning, which blocked
-        POST /emulators (named snapshot) until every warm spawn finished.
+        ``_replenish_lock`` is held only for count checks — not during boot (slow), so snapshot
+        provisioning can still take the lock between spawns. ``_ensure_full_lock`` wraps the whole
+        fill loop so only one warm spawn runs at a time (avoids parallel emulator boots).
         """
-        while True:
-            async with self._replenish_lock:
-                if await self.warm_idle_count() >= self._settings.effective_warm_pool_size():
+        async with self._ensure_full_lock:
+            while True:
+                async with self._replenish_lock:
+                    if await self.warm_idle_count() >= self._settings.effective_warm_pool_size():
+                        return
+                try:
+                    await self._spawn_one()
+                except Exception:
+                    log.exception("warm pool spawn failed")
                     return
-            try:
-                await self._spawn_one()
-            except Exception:
-                log.exception("warm pool spawn failed")
-                return
 
     async def _spawn_one(self) -> str | None:
         eid = new_emulator_id()

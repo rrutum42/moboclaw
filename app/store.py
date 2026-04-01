@@ -35,7 +35,7 @@ class EmulatorRecord:
         self.consecutive_health_failures = 0
         self.message: str | None = None
         self.adb_serial: str | None = None
-        # SDK qcow2 session AVD (ANDROID_AVD_HOME + avd name for emulator -avd).
+        # SDK session AVD (ANDROID_AVD_HOME + avd name for emulator -avd).
         self.qcow2_android_avd_home: str | None = None
         self.qcow2_avd_name: str | None = None
         self.lock = asyncio.Lock()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from app.models import SnapshotLayer, SnapshotRecord
-from app.services.qcow2_metadata import QCOW2_BRANCH_KIND, QCOW2_BRANCH_KIND_GOLDEN
+from app.services.qcow2_metadata import AVD_BRANCH_KIND, AVD_BRANCH_KIND_GOLDEN
 from app.store import InMemoryStore
 
 log = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ async def seed_base_snapshot(store: InMemoryStore) -> str:
         label="clean-android",
         metadata={
             "aosp": "mock-34",
-            QCOW2_BRANCH_KIND: QCOW2_BRANCH_KIND_GOLDEN,
+            AVD_BRANCH_KIND: AVD_BRANCH_KIND_GOLDEN,
         },
     )
     await store.add_snapshot(rec)

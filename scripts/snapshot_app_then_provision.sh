@@ -8,6 +8,7 @@
 # Requires: curl, jq
 # Usage:
 #   ./scripts/snapshot_app_then_provision.sh
+#   EMU_ID=emu-abc123 ./scripts/snapshot_app_then_provision.sh   # snapshot a specific instance
 #   BASE_URL=http://localhost:9000 ./scripts/snapshot_app_then_provision.sh
 set -euo pipefail
 
@@ -27,8 +28,31 @@ if [[ "$count" -eq 0 ]]; then
   exit 1
 fi
 
-emu_id="$(echo "$list_json" | jq -r '.[0].id')"
-echo "Using first emulator: ${emu_id}"
+# With a warm pool, list order is usually warm instances first; the first row is often NOT the
+# emulator where you installed apps (that is typically pool_role=provisioned). Prefer that.
+if [[ -n "${EMU_ID:-}" ]]; then
+  emu_id="$EMU_ID"
+  if ! echo "$list_json" | jq -e --arg id "$emu_id" 'map(.id) | index($id) != null' >/dev/null; then
+    echo "error: EMU_ID=${emu_id} is not among RUNNING emulators." >&2
+    exit 1
+  fi
+  echo "Using EMU_ID: ${emu_id}"
+else
+  prov="$(echo "$list_json" | jq '[.[] | select(.pool_role == "provisioned" or .assigned == true)]')"
+  prov_count="$(echo "$prov" | jq 'length')"
+  if [[ "$prov_count" -ge 1 ]]; then
+    emu_id="$(echo "$prov" | jq -r '.[0].id')"
+    echo "Using provisioned emulator (not warm-pool order): ${emu_id}"
+  elif [[ "$count" -eq 1 ]]; then
+    emu_id="$(echo "$list_json" | jq -r '.[0].id')"
+    echo "Using sole RUNNING emulator: ${emu_id}"
+  else
+    echo "error: multiple RUNNING emulators and none are provisioned (pool_role=provisioned)." >&2
+    echo "Install the app on the instance you want, then run:" >&2
+    echo "  EMU_ID=<id from: curl -s ${BASE_URL}/emulators?running_only=true | jq> $0" >&2
+    exit 1
+  fi
+fi
 
 echo "Creating app-layer snapshot ..."
 snap_json="$(curl -sS -f -X POST "${BASE_URL}/emulators/${emu_id}/snapshot" \

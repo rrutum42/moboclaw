@@ -18,10 +18,8 @@ class Settings(BaseSettings):
     emulator_extra_args: str = "-no-window -no-audio -gpu swiftshader_indirect -no-boot-anim -netdelay none -netspeed full"
     # headless = respect emulator_extra_args; window = strip -no-window for a visible emulator UI (macOS prototype).
     emulator_ui_mode: Literal["headless", "window"] = "headless"
-    # Per-session AVD + qcow2 userdata overlay (sdk backend). Default: .moboclaw_qcow2_sessions under cwd.
+    # Per-session AVD clones + branch snapshot dirs (sdk backend). Default: .moboclaw_qcow2_sessions under cwd.
     qcow2_session_root: Path | None = None
-    # Optional path to qemu-img (default: $ANDROID_SDK_ROOT/emulator/qemu-img).
-    qemu_img_binary: str | None = None
     emulator_port_start: int = 5554
     emulator_boot_completed_timeout_seconds: float = 420.0
     emulator_adb_poll_seconds: float = 2.0
@@ -48,7 +46,7 @@ class Settings(BaseSettings):
         return Path(str(v)).expanduser()
 
     def effective_warm_pool_size(self) -> int:
-        """SDK uses per-session qcow2 overlays; multiple concurrent writable sessions are safe."""
+        """SDK uses per-session full AVD clones; size affects disk and copy time."""
         return self.warm_pool_size
 
     def resolved_qcow2_session_root(self) -> Path:

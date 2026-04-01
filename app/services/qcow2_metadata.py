@@ -1,19 +1,32 @@
-"""v1 qcow2 snapshot branching metadata (``SnapshotRecord.metadata`` keys).
+"""Snapshot branch metadata (``SnapshotRecord.metadata`` keys).
 
-Branches are stored as flattened qcow2 images produced offline via ``qemu-img convert``
-(see ``snapshot_capture``). ADB/emulator ``avd snapshot`` save/load is not used in v1.
+Branches are stored as full **directory copies** of the session ``ANDROID_AVD_HOME`` tree (see
+``snapshot_capture``). Legacy qcow2 keys are kept as string constants for tests and old records.
 """
 
-# Flat qcow2 path on disk (absolute path string) for provisioning non-BASE snapshots.
+# --- Clone-based branch snapshots (current) ---
+
+# Absolute path to the stored branch directory (…/branches/<snapshot_id>/).
+AVD_CLONE_PATH = "avd_clone_path"
+
+# AVD name at capture time (e.g. ``moboclaw_emu-…``); used when renaming on restore.
+SESSION_AVD_NAME = "session_avd_name"
+
+# Absolute path to the session ``ANDROID_AVD_HOME`` directory at capture time; used to rewrite paths.
+SESSION_ANDROID_AVD_HOME = "session_android_avd_home"
+
+# Parent snapshot id at capture time (string).
+AVD_PARENT_SNAPSHOT_ID = "avd_parent_snapshot_id"
+
+# Optional: BASE seed marker (not a filesystem path).
+AVD_BRANCH_KIND = "avd_branch_kind"
+AVD_BRANCH_KIND_GOLDEN = "golden"
+
+# --- Legacy qcow2 v1 (deprecated; not written by new captures) ---
+
 QCOW2_USERDATA_PATH = "qcow2_userdata_path"
-
-# Parent snapshot id at capture time (string, mirrors ``SnapshotRecord.parent_snapshot_id``).
 QCOW2_PARENT_SNAPSHOT_ID = "qcow2_parent_snapshot_id"
-
-# Format discriminator; v1 uses a single flattened image.
 QCOW2_FORMAT = "qcow2_format"
 QCOW2_FORMAT_FLAT = "flat_qcow2"
-
-# Optional: BASE snapshot seed marker (not a filesystem path).
 QCOW2_BRANCH_KIND = "qcow2_branch_kind"
 QCOW2_BRANCH_KIND_GOLDEN = "golden"
