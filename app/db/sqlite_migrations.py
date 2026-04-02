@@ -39,3 +39,15 @@ def migrate_snapshots_table_sync(sync_conn) -> None:
                 "could not DROP COLUMN metadata (SQLite 3.35+ required or delete sessions.db): %s",
                 e,
             )
+
+
+def migrate_mission_tasks_sync(sync_conn) -> None:
+    insp = inspect(sync_conn)
+    if not insp.has_table("mission_tasks"):
+        return
+    cols = {c["name"] for c in insp.get_columns("mission_tasks")}
+    if "re_auth_login_method" not in cols:
+        sync_conn.execute(
+            text("ALTER TABLE mission_tasks ADD COLUMN re_auth_login_method VARCHAR(32)")
+        )
+        log.info("migrated mission_tasks: added re_auth_login_method")

@@ -202,7 +202,7 @@ Behavior depends on **`EMULATOR_BACKEND`**: **`mock`** (simulated) vs **`sdk`** 
 
 ### `GET /missions/{mission_id}`
 
-**Response** `200 OK` — mission + tasks + `webhook_url`, `error_detail`.
+**Response** `200 OK` — mission + tasks + `webhook_url`, `error_detail`. When `state` is `re_auth_required` (expired session for a targeted app), the body also includes **`re_auth_app_package`** and **`re_auth_login_method`** (from that app’s stored session / verify), and **`error_detail`** is set as soon as that happens (not only after the mission runner finishes). Per-task `re_auth_login_method` is set on the task in that state.
 
 **Errors:** `404` — mission not found.
 

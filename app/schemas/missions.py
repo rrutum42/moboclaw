@@ -24,6 +24,10 @@ class MissionTaskOut(BaseModel):
     state: str
     emulator_id: str | None = None
     error_message: str | None = None
+    re_auth_login_method: str | None = Field(
+        default=None,
+        description="When state is re_auth_required, login method from the user session (verify).",
+    )
     identity_gate_notified_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -37,6 +41,14 @@ class MissionDetailResponse(BaseModel):
     state: str
     webhook_url: str | None = None
     error_detail: str | None = None
+    re_auth_app_package: str | None = Field(
+        default=None,
+        description="When state is re_auth_required, app that needs re-login (first such task).",
+    )
+    re_auth_login_method: str | None = Field(
+        default=None,
+        description="When state is re_auth_required, login method from that app's UserSession.",
+    )
     tasks: list[MissionTaskOut]
     created_at: datetime
     updated_at: datetime

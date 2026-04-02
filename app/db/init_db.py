@@ -9,7 +9,7 @@ from app.db import orm  # noqa: F401
 from app.db.base import Base
 from app.db.engine import engine
 from app.db.seed import seed_dummy_sessions_if_empty, seed_reference_snapshots
-from app.db.sqlite_migrations import migrate_snapshots_table_sync
+from app.db.sqlite_migrations import migrate_mission_tasks_sync, migrate_snapshots_table_sync
 from app.session_config import session_settings
 
 log = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ async def init_db() -> None:
                 await conn.run_sync(Base.metadata.create_all)
                 if engine.dialect.name == "sqlite":
                     await conn.run_sync(migrate_snapshots_table_sync)
+                    await conn.run_sync(migrate_mission_tasks_sync)
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
             log.info("database ready")
