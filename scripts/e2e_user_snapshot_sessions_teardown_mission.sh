@@ -86,6 +86,17 @@ verify_json() {
   fi
 }
 
+# Mission poll logs: aligned columns via column -t.
+e2e_print_mission_tasks() {
+  local json="$1"
+  {
+    printf '%s\t%s\t%s\t%s\n' "task_id" "goal" "status" "emulator_id"
+    echo "$json" | jq -r --arg dash '-' '.tasks[] | [.task_id, .goal, .state, (.emulator_id // $dash)] | @tsv'
+  } | column -t -s $'\t' | while IFS= read -r line; do
+    echo "[e2e]   $line"
+  done
+}
+
 echo "[e2e] POST verify session $PKG_CALC"
 curl -sS -X POST "$BASE/users/$USER_ID/sessions/$PKG_CALC/verify" \
   -H 'Content-Type: application/json' \
@@ -130,17 +141,20 @@ echo "[e2e] Polling mission (max ${MISSION_WAIT_SEC}s)..."
 deadline=$(( $(date +%s) + MISSION_WAIT_SEC ))
 state=""
 while true; do
-  state=$(curl -sS "$BASE/missions/$MID" | jq -r .state)
+  mission_json=$(curl -sS "$BASE/missions/$MID")
+  state=$(echo "$mission_json" | jq -r .state)
+  echo ""
   echo "[e2e] mission state=$state"
+  e2e_print_mission_tasks "$mission_json"
   if [[ "$state" == "done" || "$state" == "failed" || "$state" == "re_auth_required" ]]; then
     break
   fi
   if [[ $(date +%s) -ge $deadline ]]; then
     echo "[e2e] ERROR: timeout waiting for terminal mission state" >&2
-    curl -sS "$BASE/missions/$MID" | jq
+    echo "$mission_json" | jq
     exit 1
   fi
-  sleep 30
+  sleep 5
 done
 
 curl -sS "$BASE/missions/$MID" | jq
