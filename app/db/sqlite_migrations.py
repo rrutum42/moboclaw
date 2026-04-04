@@ -41,6 +41,20 @@ def migrate_snapshots_table_sync(sync_conn) -> None:
             )
 
 
+def migrate_user_sessions_scheduling_sync(sync_conn) -> None:
+    """Add jittered scheduling + optional metadata TTL columns (create_all skips ALTER)."""
+    insp = inspect(sync_conn)
+    if not insp.has_table("user_sessions"):
+        return
+    cols = {c["name"] for c in insp.get_columns("user_sessions")}
+    if "next_check_at" not in cols:
+        sync_conn.execute(text("ALTER TABLE user_sessions ADD COLUMN next_check_at DATETIME"))
+        log.info("migrated user_sessions: added next_check_at")
+    if "session_expires_at" not in cols:
+        sync_conn.execute(text("ALTER TABLE user_sessions ADD COLUMN session_expires_at DATETIME"))
+        log.info("migrated user_sessions: added session_expires_at")
+
+
 def migrate_mission_tasks_sync(sync_conn) -> None:
     insp = inspect(sync_conn)
     if not insp.has_table("mission_tasks"):

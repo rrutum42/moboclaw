@@ -3,11 +3,11 @@ from __future__ import annotations
 import logging
 import random
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger(__name__)
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.orm import (
@@ -54,6 +54,27 @@ def compute_tier(last_access_at: datetime | None, now: datetime) -> SessionTier:
 def apply_tier(session: UserSession, now: datetime) -> None:
     t = compute_tier(session.last_access_at, now)
     session.tier = t.value
+
+
+def _interval_seconds_for_tier(tier: str) -> int:
+    if tier == SessionTier.hot.value:
+        return session_settings.hot_check_interval_seconds
+    if tier == SessionTier.warm.value:
+        return session_settings.warm_check_interval_seconds
+    return session_settings.warm_check_interval_seconds
+
+
+def compute_next_check_at(
+    anchor: datetime, tier: str, now: datetime
+) -> datetime | None:
+    """Schedule the next background check at anchor + interval + jitter (hot/warm only)."""
+    if tier == SessionTier.cold.value:
+        return None
+    interval = _interval_seconds_for_tier(tier)
+    jitter = random.uniform(
+        0.0, interval * session_settings.health_check_jitter_fraction
+    )
+    return anchor + timedelta(seconds=interval + jitter)
 
 
 async def ensure_user(db: AsyncSession, user_id: str) -> User:
@@ -141,6 +162,8 @@ async def verify_session(
 
     observed, health = await _mock_classify_and_update(db, session, now)
     re_auth = health == SessionHealth.expired.value
+    nxt = compute_next_check_at(now, session.tier, now)
+    session.next_check_at = nxt
     log.info(
         "session verify user=%s app=%s session_id=%s health=%s tier=%s observed=%s",
         user_id,
@@ -181,6 +204,29 @@ async def _mock_classify_and_update(
     return observed, session.health
 
 
+async def _metadata_expire_if_applicable(
+    db: AsyncSession, session: UserSession, now: datetime
+) -> bool:
+    """If session_expires_at is in the past, mark expired without emulator (cheap path)."""
+    if session.session_expires_at is None:
+        return False
+    if _as_utc(session.session_expires_at) >= now:
+        return False
+    if session.health == SessionHealth.expired.value:
+        return False
+    session.health = SessionHealth.expired.value
+    session.last_verified_at = now
+    db.add(
+        SessionHealthEvent(
+            session_id=session.id,
+            checked_at=now,
+            observed="expired",
+            detail="metadata_ttl",
+        )
+    )
+    return True
+
+
 async def health_history(
     db: AsyncSession, user_id: str, app_package: str, limit: int
 ) -> HealthHistoryResponse:
@@ -216,21 +262,55 @@ async def health_history(
 
 
 async def scan_stale_sessions_for_worker(db: AsyncSession) -> int:
+    """
+    Hot/warm sessions only (cold: no proactive checks). Rate-limited expensive checks per tick.
+    Uses next_check_at + jitter to avoid thundering herds after restarts.
+    """
     now = utcnow()
-    r = await db.execute(select(UserSession))
+    warm_cutoff = now - timedelta(seconds=session_settings.tier_warm_access_seconds)
+    max_checks = session_settings.max_health_checks_per_tick
+    fetch_limit = max(max_checks * 50, max_checks)
+
+    stmt = (
+        select(UserSession)
+        .where(
+            UserSession.last_access_at.isnot(None),
+            UserSession.last_access_at >= warm_cutoff,
+            or_(UserSession.next_check_at.is_(None), UserSession.next_check_at <= now),
+        )
+        .order_by(UserSession.next_check_at.asc().nullsfirst())
+        .limit(fetch_limit)
+    )
+    r = await db.execute(stmt)
     sessions = list(r.scalars().all())
-    checked = 0
+
+    checks_done = 0
     for session in sessions:
+        if checks_done >= max_checks:
+            break
+
         apply_tier(session, now)
         if session.tier == SessionTier.cold.value:
+            session.next_check_at = None
             continue
-        interval = (
-            session_settings.hot_check_interval_seconds
-            if session.tier == SessionTier.hot.value
-            else session_settings.warm_check_interval_seconds
-        )
-        lv = session.last_verified_at
-        if lv is None or (now - _as_utc(lv)).total_seconds() >= interval:
-            await _mock_classify_and_update(db, session, now)
-            checked += 1
-    return checked
+
+        if session.next_check_at is None:
+            if session.last_verified_at is None:
+                session.next_check_at = now
+            else:
+                session.next_check_at = compute_next_check_at(
+                    _as_utc(session.last_verified_at), session.tier, now
+                )
+            if session.next_check_at is None or session.next_check_at > now:
+                continue
+
+        if await _metadata_expire_if_applicable(db, session, now):
+            session.next_check_at = compute_next_check_at(now, session.tier, now)
+            checks_done += 1
+            continue
+
+        await _mock_classify_and_update(db, session, now)
+        session.next_check_at = compute_next_check_at(now, session.tier, now)
+        checks_done += 1
+
+    return checks_done

@@ -93,6 +93,14 @@ class UserSession(Base):
     last_access_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     login_method: Mapped[str] = mapped_column(String(32), default=LoginMethod.otp.value)
     tier: Mapped[str] = mapped_column(String(32), default=SessionTier.cold.value)
+    # When the next background health pass should run (hot/warm only; cold leaves NULL).
+    next_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Optional wall-clock expiry (e.g. OAuth refresh window). Metadata-only expiry without emulator.
+    session_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     user: Mapped[User] = relationship(back_populates="sessions")
     snapshot: Mapped[Snapshot | None] = relationship(back_populates="user_sessions")

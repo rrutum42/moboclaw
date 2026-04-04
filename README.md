@@ -69,6 +69,8 @@ SQLite defaults to `./sessions.db` (or `/app/data/sessions.db` in Docker). Overr
 | `SESSION_HOT_CHECK_INTERVAL_SECONDS` | `86400` | Auto-check interval for hot |
 | `SESSION_WARM_CHECK_INTERVAL_SECONDS` | `604800` | Auto-check for warm (cold only via verify) |
 | `SESSION_WORKER_TICK_SECONDS` | `30` | Session worker poll interval |
+| `SESSION_HEALTH_CHECK_JITTER_FRACTION` | `0.1` | Jitter spread: next check at `anchor + interval + U(0, interval×this)` |
+| `SESSION_MAX_HEALTH_CHECKS_PER_TICK` | `20` | Max mock or metadata health passes per tick (rate limit) |
 | `SESSION_MOCK_LOGGED_IN_PROBABILITY` | `0.8` | Mock “logged in” probability on verify/check |
 
 ### Emulators (`EMULATOR_*` and related)
