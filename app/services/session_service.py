@@ -110,8 +110,13 @@ def _entry_from_session(s: UserSession) -> SessionEntry:
     )
 
 
-async def list_sessions(db: AsyncSession, user_id: str) -> SessionsListResponse:
-    r = await db.execute(select(UserSession).where(UserSession.user_id == user_id))
+async def list_sessions(
+    db: AsyncSession, user_id: str, *, logged_in_only: bool = False
+) -> SessionsListResponse:
+    stmt = select(UserSession).where(UserSession.user_id == user_id)
+    if logged_in_only:
+        stmt = stmt.where(UserSession.health == SessionHealth.alive.value)
+    r = await db.execute(stmt)
     rows = list(r.scalars().all())
     now = utcnow()
     for s in rows:

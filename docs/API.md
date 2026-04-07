@@ -9,6 +9,22 @@
 
 Use header **`Content-Type: application/json`** for request bodies where a body is required.
 
+**OpenAPI / docs:** Interactive docs remain at **`/docs`** and **`/openapi.json`** on the same host and port as the REST API (served by the mounted REST sub-application).
+
+---
+
+## MCP (Model Context Protocol)
+
+The service exposes an MCP server generated from the FastAPI OpenAPI surface via **FastMCP** at **`/mcp/`**. **`GET`/`POST`/`DELETE` to `/mcp` (no trailing slash) return `307` to `/mcp/`** so clients that omit the slash (e.g. some MCP hosts) still reach the endpoint.
+
+| Item | Value |
+|------|--------|
+| Streamable HTTP base | `http://<host>:<port>/mcp/` (or `http://<host>:<port>/mcp` → redirect) |
+| Example (local Uvicorn) | `http://localhost:8080/mcp/` |
+| Example (Docker Compose host port) | `http://localhost:8082/mcp/` |
+
+Connect an MCP client to that URL to list tools (mapped from REST operation IDs and routes). REST endpoints are unchanged; MCP is an additional interface.
+
 ---
 
 ## System
@@ -138,7 +154,13 @@ Behavior depends on **`EMULATOR_BACKEND`**: **`mock`** (simulated) vs **`sdk`** 
 
 ### `GET /users/{user_id}/sessions`
 
-**Purpose:** List all sessions for a user.
+**Purpose:** List sessions for a user.
+
+**Query parameters**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `logged_in_only` | boolean | `false` | If `true`, return only sessions whose **`health`** is **`alive`** (verified “logged in”; excludes `unknown` and `expired`). |
 
 **Response** `200 OK` — `SessionsListResponse`
 

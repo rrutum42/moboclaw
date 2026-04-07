@@ -6,6 +6,9 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastmcp import FastMCP
+from starlette.responses import RedirectResponse
+from fastmcp.utilities.lifespan import combine_lifespans
 
 from app.background import start_background_workers, stop_background_workers
 from app.config import settings
@@ -23,7 +26,7 @@ log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def moboclaw_lifespan(app: FastAPI):
     await init_db()
     await hydrate_store_from_db(orchestrator_store)
     workers = await start_background_workers()
@@ -37,16 +40,27 @@ async def lifespan(app: FastAPI):
     await stop_background_workers(workers)
 
 
-app = FastAPI(
+api = FastAPI(
     title="Mobile Agent — Emulator + Sessions + Missions",
     version="0.3.0",
-    lifespan=lifespan,
+)
+
+api.include_router(system.router)
+api.include_router(emulators.router)
+api.include_router(users_sessions.router)
+api.include_router(missions.router)
+
+mcp = FastMCP.from_fastapi(app=api, name="Moboclaw")
+mcp_http = mcp.http_app(path="/")
+
+app = FastAPI(
+    lifespan=combine_lifespans(moboclaw_lifespan, mcp_http.lifespan),
 )
 
 
 @app.middleware("http")
-async def log_all_requests(request: Request, call_next):
-    """Log every HTTP request with duration and status (body logging skipped for size/safety)."""
+async def log_all_requests_root(request: Request, call_next):
+    """Log every HTTP request (REST + MCP); body logging skipped for size/safety."""
     rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
     request.state.request_id = rid
     t0 = time.perf_counter()
@@ -83,7 +97,15 @@ async def log_all_requests(request: Request, call_next):
     return response
 
 
-app.include_router(system.router)
-app.include_router(emulators.router)
-app.include_router(users_sessions.router)
-app.include_router(missions.router)
+@app.api_route(
+    "/mcp",
+    methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def mcp_redirect_slash() -> RedirectResponse:
+    """Cursor and some clients call `/mcp` without a trailing slash; the mount is `/mcp/`."""
+    return RedirectResponse(url="/mcp/", status_code=307)
+
+
+app.mount("/mcp/", mcp_http)
+app.mount("/", api)

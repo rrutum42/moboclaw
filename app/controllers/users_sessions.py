@@ -28,12 +28,17 @@ async def create_user(
     return CreateUserResponse(user_id=user_id)
 
 
-@router.get("/{user_id}/sessions", response_model=SessionsListResponse)
+@router.get(
+    "/{user_id}/sessions",
+    response_model=SessionsListResponse,
+    operation_id="list_user_sessions",
+)
 async def list_user_sessions(
     user_id: str,
+    logged_in_only: bool = False,
     db: AsyncSession = Depends(get_db),
 ) -> SessionsListResponse:
-    return await session_service.list_sessions(db, user_id)
+    return await session_service.list_sessions(db, user_id, logged_in_only=logged_in_only)
 
 
 @router.post("/{user_id}/sessions/{app_package}/verify", response_model=VerifySessionResponse)
